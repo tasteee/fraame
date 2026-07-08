@@ -234,7 +234,12 @@ export async function extractFrames(params: ExtractParamsT): Promise<void> {
 // Re-decodes a single frame from the original file at full resolution and
 // returns it as a PNG. Uses its own demuxer instance so it can run while the
 // main extraction is still in progress.
-export async function extractFullResFrame(file: File, info: VideoInfoT, timeSec: number): Promise<Blob> {
+export async function extractFullResFrame(
+  file: File,
+  info: VideoInfoT,
+  timeSec: number,
+  viewRotation = 0,
+): Promise<Blob> {
   const demuxer = new WebDemuxer({ wasmLoaderPath })
   let best: VideoFrame | null = null
   try {
@@ -290,13 +295,14 @@ export async function extractFullResFrame(file: File, info: VideoInfoT, timeSec:
     if (pipelineError) throw pipelineError
     if (!best) throw new Error('No frame decoded at that time.')
 
-    const swapped = info.rotation === 90 || info.rotation === 270
+    const rotation = normalizeRotation(info.rotation + viewRotation)
+    const swapped = rotation === 90 || rotation === 270
     const outW = swapped ? info.height : info.width
     const outH = swapped ? info.width : info.height
     const canvas = new OffscreenCanvas(outW, outH)
     const ctx = canvas.getContext('2d')
     if (!ctx) throw new Error('Could not create a canvas context.')
-    drawRotated({ ctx, rotation: info.rotation, outW, outH }, best)
+    drawRotated({ ctx, rotation, outW, outH }, best)
     return await canvas.convertToBlob({ type: 'image/png' })
   } finally {
     ;(best as VideoFrame | null)?.close()

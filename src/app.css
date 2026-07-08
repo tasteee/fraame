@@ -284,6 +284,12 @@ body {
   pointer-events: auto;
 }
 
+.overlay.top-right {
+  top: max(12px, env(safe-area-inset-top));
+  right: max(12px, env(safe-area-inset-right));
+  pointer-events: auto;
+}
+
 .overlay.top-center {
   top: max(12px, env(safe-area-inset-top));
   left: 50%;
@@ -313,4 +319,39 @@ body {
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
   white-space: nowrap;
+}
+
+.hud-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-width: 68px;
+  height: 34px;
+  padding: 0 13px;
+  color: #fff;
+  font: 700 0.82rem var(--font-sans);
+  cursor: pointer;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  background: rgba(10, 10, 12, 0.62);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+.hud-button:hover,
+.hud-button:focus-visible {
+  border-color: rgba(255, 255, 255, 0.24);
+  background: rgba(28, 28, 34, 0.76);
+}
+
+.hud-button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 72%, white);
+  outline-offset: 2px;
+}
+
+@media (max-width: 520px) {
+  .overlay.top-center {
+    top: max(54px, calc(env(safe-area-inset-top) + 54px));
+  }
 }

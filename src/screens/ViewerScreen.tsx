@@ -19,6 +19,9 @@ const FINE_PX_PER_FRAME = 48
 const TAP_MAX_MOVEMENT = 12
 const TAP_MAX_GAP_MS = 450
 const PREFETCH_RADIUS = 20
+const VIEW_ROTATIONS = [0, 90, 180, 270] as const
+
+type ViewRotationT = (typeof VIEW_ROTATIONS)[number]
 
 const formatTime = (sec: number) => {
   const minutes = Math.floor(sec / 60)
@@ -30,6 +33,7 @@ const formatTime = (sec: number) => {
 export const ViewerScreen = (props: PropsT) => {
   const [index, setIndex] = createSignal(0)
   const [toast, setToast] = createSignal<string | null>(null)
+  const [viewRotation, setViewRotation] = createSignal<ViewRotationT>(0)
   let rootRef: HTMLDivElement | undefined
   let canvasRef: HTMLCanvasElement | undefined
 
@@ -39,20 +43,44 @@ export const ViewerScreen = (props: PropsT) => {
   const clampIndex = (i: number) => Math.max(0, Math.min(props.frameCount() - 1, i))
 
   let drawSequence = 0
+  const drawRotatedBitmap = (ctx: CanvasRenderingContext2D, bitmap: ImageBitmap, rotation: ViewRotationT) => {
+    const canvas = ctx.canvas
+    ctx.clearRect(0, 0, canvas.width, canvas.height)
+    ctx.save()
+    if (rotation === 90) {
+      ctx.translate(canvas.width, 0)
+      ctx.rotate(Math.PI / 2)
+    } else if (rotation === 180) {
+      ctx.translate(canvas.width, canvas.height)
+      ctx.rotate(Math.PI)
+    } else if (rotation === 270) {
+      ctx.translate(0, canvas.height)
+      ctx.rotate(-Math.PI / 2)
+    }
+    ctx.drawImage(bitmap, 0, 0)
+    ctx.restore()
+  }
+
   const draw = async () => {
     const i = index()
+    const rotation = viewRotation()
     if (props.frameCount() === 0) return
     const sequence = ++drawSequence
     const bitmap = await cache.load(i)
     if (!bitmap || sequence !== drawSequence || !canvasRef) return
-    if (canvasRef.width !== bitmap.width) canvasRef.width = bitmap.width
-    if (canvasRef.height !== bitmap.height) canvasRef.height = bitmap.height
-    canvasRef.getContext('2d')?.drawImage(bitmap, 0, 0)
+    const isSideways = rotation === 90 || rotation === 270
+    const width = isSideways ? bitmap.height : bitmap.width
+    const height = isSideways ? bitmap.width : bitmap.height
+    if (canvasRef.width !== width) canvasRef.width = width
+    if (canvasRef.height !== height) canvasRef.height = height
+    const ctx = canvasRef.getContext('2d')
+    if (ctx) drawRotatedBitmap(ctx, bitmap, rotation)
     cache.prefetch(i, PREFETCH_RADIUS, props.frameCount())
   }
 
   createEffect(() => {
     index()
+    viewRotation()
     props.frameCount()
     void draw()
   })
@@ -154,7 +182,7 @@ export const ViewerScreen = (props: PropsT) => {
     isDownloading = true
     showToast(`saving frame ${i + 1}…`)
     try {
-      const blob = await extractFullResFrame(props.file, props.info, frame.timeSec)
+      const blob = await extractFullResFrame(props.file, props.info, frame.timeSec, viewRotation())
       const url = URL.createObjectURL(blob)
       const anchor = document.createElement('a')
       const base = props.file.name.replace(/\.[^.]+$/, '')
@@ -180,6 +208,11 @@ export const ViewerScreen = (props: PropsT) => {
   const totalLabel = () => {
     const count = props.frameCount().toLocaleString()
     return props.isExtracting() ? `~${count}` : count
+  }
+
+  const rotateView = () => {
+    const currentIndex = VIEW_ROTATIONS.indexOf(viewRotation())
+    setViewRotation(VIEW_ROTATIONS[(currentIndex + 1) % VIEW_ROTATIONS.length])
   }
 
   return (
@@ -222,6 +255,19 @@ export const ViewerScreen = (props: PropsT) => {
       </div>
 
       <Show when={props.frameCount() > 0}>
+        <div class="overlay top-right" onPointerDown={(event) => event.stopPropagation()}>
+          <button
+            type="button"
+            class="hud-button"
+            aria-label={`Rotate frame view, currently ${viewRotation()} degrees`}
+            title={`Rotate view (${viewRotation()} degrees)`}
+            onClick={rotateView}
+          >
+            <span aria-hidden="true">↻</span>
+            <span>{viewRotation()}°</span>
+          </button>
+        </div>
+
         <div class="overlay top-center">
           <div class="hud">
             <z-text size="sm">
