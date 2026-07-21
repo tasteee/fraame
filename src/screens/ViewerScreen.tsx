@@ -1,6 +1,6 @@
-import { Show, createEffect, createSignal, onCleanup, onMount } from 'solid-js'
+import { For, Show, createEffect, createSignal, onCleanup, onMount } from 'solid-js'
 import { createBitmapCache } from '../lib/bitmapCache'
-import { extractFullResFrame, type FrameT, type VideoInfoT } from '../lib/video'
+import { extractFullResFrame, releaseFullResDemuxer, type FrameT, type VideoInfoT } from '../lib/video'
 
 type PropsT = {
   file: File
@@ -23,6 +23,14 @@ const VIEW_ROTATIONS = [0, 90, 180, 270] as const
 
 type ViewRotationT = (typeof VIEW_ROTATIONS)[number]
 
+type SaveToastStatusT = 'saving' | 'saved' | 'error'
+
+type SaveToastT = {
+  id: number
+  frameIndex: number
+  status: SaveToastStatusT
+}
+
 const formatTime = (sec: number) => {
   const minutes = Math.floor(sec / 60)
   const seconds = Math.floor(sec % 60)
@@ -32,13 +40,14 @@ const formatTime = (sec: number) => {
 
 export const ViewerScreen = (props: PropsT) => {
   const [index, setIndex] = createSignal(0)
-  const [toast, setToast] = createSignal<string | null>(null)
+  const [saveToasts, setSaveToasts] = createSignal<SaveToastT[]>([])
   const [viewRotation, setViewRotation] = createSignal<ViewRotationT>(0)
   let rootRef: HTMLDivElement | undefined
   let canvasRef: HTMLCanvasElement | undefined
 
   const cache = createBitmapCache((i) => props.frames[i]?.blob)
   onCleanup(() => cache.clear())
+  onCleanup(() => releaseFullResDemuxer())
 
   const clampIndex = (i: number) => Math.max(0, Math.min(props.frameCount() - 1, i))
 
@@ -166,21 +175,58 @@ export const ViewerScreen = (props: PropsT) => {
 
   // ---- download ----
 
-  let isDownloading = false
-  let toastTimer: ReturnType<typeof setTimeout> | undefined
-  const showToast = (message: string, holdMs?: number) => {
-    if (toastTimer) clearTimeout(toastTimer)
-    setToast(message)
-    if (holdMs) toastTimer = setTimeout(() => setToast(null), holdMs)
+  const toastTimers = new Map<number, ReturnType<typeof setTimeout>>()
+  let nextToastId = 0
+
+  const clearToastTimer = (id: number) => {
+    const timer = toastTimers.get(id)
+    if (!timer) return
+    clearTimeout(timer)
+    toastTimers.delete(id)
   }
 
+  const removeSaveToast = (id: number) => {
+    clearToastTimer(id)
+    setSaveToasts((entries) => entries.filter((entry) => entry.id !== id))
+  }
+
+  const scheduleToastRemoval = (id: number, delayMs: number) => {
+    clearToastTimer(id)
+    toastTimers.set(
+      id,
+      setTimeout(() => removeSaveToast(id), delayMs),
+    )
+  }
+
+  const updateSaveToastStatus = (id: number, status: SaveToastStatusT) => {
+    setSaveToasts((entries) => entries.map((entry) => (entry.id === id ? { ...entry, status } : entry)))
+  }
+
+  const addSaveToast = (frameIndex: number): number => {
+    const id = nextToastId++
+    setSaveToasts((entries) => [...entries, { id, frameIndex, status: 'saving' }])
+    return id
+  }
+
+  const getSaveToastLabel = (entry: SaveToastT): string => {
+    const frameNumber = entry.frameIndex + 1
+    if (entry.status === 'saving') return `saving frame ${frameNumber}…`
+    if (entry.status === 'error') return `could not save frame ${frameNumber}`
+    return `saved frame ${frameNumber}`
+  }
+
+  onCleanup(() => {
+    for (const timer of toastTimers.values()) clearTimeout(timer)
+  })
+
   const downloadCurrentFrame = async () => {
-    if (isDownloading) return
     const i = index()
     const frame = props.frames[i]
     if (!frame) return
-    isDownloading = true
-    showToast(`saving frame ${i + 1}…`)
+    const isAlreadySavingThisFrame = saveToasts().some((entry) => entry.frameIndex === i && entry.status === 'saving')
+    if (isAlreadySavingThisFrame) return
+
+    const toastId = addSaveToast(i)
     try {
       const blob = await extractFullResFrame(props.file, props.info, frame.timeSec, viewRotation())
       const url = URL.createObjectURL(blob)
@@ -190,11 +236,11 @@ export const ViewerScreen = (props: PropsT) => {
       anchor.download = `${base}-frame-${i + 1}.png`
       anchor.click()
       URL.revokeObjectURL(url)
-      showToast(`saved frame ${i + 1}`, 1600)
+      updateSaveToastStatus(toastId, 'saved')
+      scheduleToastRemoval(toastId, 1600)
     } catch {
-      showToast('could not save this frame', 2200)
-    } finally {
-      isDownloading = false
+      updateSaveToastStatus(toastId, 'error')
+      scheduleToastRemoval(toastId, 2200)
     }
   }
 
@@ -288,14 +334,13 @@ export const ViewerScreen = (props: PropsT) => {
               <z-badge tone="danger" size="sm" label="extraction stopped early"></z-badge>
             </Show>
           </div>
-        </div>
-      </Show>
-
-      <Show when={toast()}>
-        <div class="overlay center-toast">
-          <div class="hud">
-            <z-text size="sm">{toast()}</z-text>
-          </div>
+          <For each={saveToasts()}>
+            {(entry) => (
+              <div class="hud">
+                <z-text size="sm">{getSaveToastLabel(entry)}</z-text>
+              </div>
+            )}
+          </For>
         </div>
       </Show>
     </div>

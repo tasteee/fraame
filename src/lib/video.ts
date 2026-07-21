@@ -193,7 +193,7 @@ export async function extractFrames(params: ExtractParamsT): Promise<void> {
       pipelineError = error as Error
     },
   })
-  decoder.configure(config)
+  decoder.configure({ ...config, hardwareAcceleration: 'prefer-hardware' })
 
   const waitFor = (condition: () => boolean) =>
     new Promise<void>((resolve) => {
@@ -231,24 +231,63 @@ export async function extractFrames(params: ExtractParamsT): Promise<void> {
   if (pipelineError && !signal.aborted) throw pipelineError
 }
 
+type FullResDemuxerCacheT = {
+  file: File
+  demuxer: WebDemuxer
+  baseUs: number
+}
+
+// Spinning up a WebDemuxer means starting a dedicated Worker and
+// compiling the ~4MB ffmpeg WASM module from scratch, so this is kept
+// alive and reused across every full-res download for the same file
+// instead of paying that cost on every triple-tap.
+let fullResCache: FullResDemuxerCacheT | null = null
+
+const createFullResDemuxer = async (file: File): Promise<FullResDemuxerCacheT> => {
+  const demuxer = new WebDemuxer({ wasmLoaderPath })
+  try {
+    await demuxer.load(file)
+    const basePacket = await demuxer.seekVideoPacket(0)
+    const baseUs = basePacket.timestamp * 1e6
+    return { file, demuxer, baseUs }
+  } catch (error) {
+    demuxer.destroy()
+    throw error
+  }
+}
+
+const getFullResDemuxer = async (file: File): Promise<FullResDemuxerCacheT> => {
+  const isCachedForThisFile = fullResCache !== null && fullResCache.file === file
+  if (isCachedForThisFile) return fullResCache as FullResDemuxerCacheT
+
+  fullResCache?.demuxer.destroy()
+  fullResCache = await createFullResDemuxer(file)
+  return fullResCache
+}
+
+// Releases the cached full-res demuxer. Call this when the viewer for
+// a file is torn down so its worker doesn't linger in the background.
+export const releaseFullResDemuxer = (): void => {
+  fullResCache?.demuxer.destroy()
+  fullResCache = null
+}
+
 // Re-decodes a single frame from the original file at full resolution and
-// returns it as a PNG. Uses its own demuxer instance so it can run while the
-// main extraction is still in progress.
-export async function extractFullResFrame(
+// returns it as a PNG. Reuses a cached demuxer instance (see above) so it
+// can run while the main extraction is still in progress without paying
+// for a fresh WASM instance on every call.
+export const extractFullResFrame = async (
   file: File,
   info: VideoInfoT,
   timeSec: number,
   viewRotation = 0,
-): Promise<Blob> {
-  const demuxer = new WebDemuxer({ wasmLoaderPath })
+): Promise<Blob> => {
+  const cached = await getFullResDemuxer(file)
+  const demuxer = cached.demuxer
   let best: VideoFrame | null = null
   try {
-    await demuxer.load(file)
     const config = await demuxer.getVideoDecoderConfig()
-
-    const basePacket = await demuxer.seekVideoPacket(0)
-    const baseUs = basePacket.timestamp * 1e6
-    const targetUs = baseUs + timeSec * 1e6
+    const targetUs = cached.baseUs + timeSec * 1e6
     const halfFrameUs = 0.5e6 / info.fps
 
     let pipelineError: Error | null = null
@@ -266,9 +305,9 @@ export async function extractFullResFrame(
         pipelineError = error as Error
       },
     })
-    decoder.configure(config)
+    decoder.configure({ ...config, hardwareAcceleration: 'prefer-hardware' })
 
-    const seekSec = Math.max(0, baseUs / 1e6 + timeSec)
+    const seekSec = Math.max(0, cached.baseUs / 1e6 + timeSec)
     const reader = demuxer.readVideoPacket(seekSec).getReader()
     try {
       while (!pipelineError) {
@@ -306,6 +345,5 @@ export async function extractFullResFrame(
     return await canvas.convertToBlob({ type: 'image/png' })
   } finally {
     ;(best as VideoFrame | null)?.close()
-    demuxer.destroy()
   }
 }
