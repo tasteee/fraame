@@ -103,6 +103,21 @@ export const drawRotated = (target: RotationDrawTargetT, source: CanvasImageSour
   ctx.restore()
 }
 
+// Scrub proxies only have to look right on screen; the download path always
+// re-decodes at full resolution. Keeping the proxy well under display size is
+// what lets a useful number of frames fit in the cache at once, and smaller
+// frames also make each transferToImageBitmap noticeably cheaper on phones.
+const SCRUB_MAX_DIM = 960
+
+// Both scrub paths — decoded frames and the native preview — paint at this
+// size, so handing off between them never resizes the canvas.
+export const getScrubSize = (info: VideoInfoT) => {
+  const devicePixels = Math.max(window.innerWidth, window.innerHeight) * (window.devicePixelRatio || 1)
+  const deviceMaxDim = Math.round(devicePixels)
+  const scrubMaxDim = Math.min(SCRUB_MAX_DIM, deviceMaxDim)
+  return displaySize(info, scrubMaxDim)
+}
+
 export const displaySize = (info: VideoInfoT, maxDim: number) => {
   const swapped = info.rotation === 90 || info.rotation === 270
   const naturalW = swapped ? info.height : info.width

@@ -1,6 +1,7 @@
 import { For, Show, createEffect, createSignal, onCleanup, onMount } from 'solid-js'
 import type { FrameSourceT } from '../lib/frameSource'
-import { extractFullResFrame, releaseFullResDemuxer, type VideoInfoT } from '../lib/video'
+import { extractFullResFrame, getScrubSize, releaseFullResDemuxer, type VideoInfoT } from '../lib/video'
+import { createVideoPreview, type VideoPreviewT } from '../lib/videoPreview'
 
 type PropsT = {
   file: File
@@ -27,7 +28,19 @@ const DECODE_SETTLE_MS = 55
 // showing it silently is worse than admitting we're still seeking.
 const MAX_STALE_FRAME_DISTANCE = 45
 
+type PaintSourceT = {
+  image: CanvasImageSource
+  width: number
+  height: number
+}
+
 type ViewRotationT = (typeof VIEW_ROTATIONS)[number]
+
+// What the canvas is currently showing. Only a stale neighbour is dimmed:
+// the native preview is the right moment in the video and reads as final
+// enough to leave at full strength, where dimming it for the whole drag
+// would make every scrub look broken.
+type PaintKindT = 'exact' | 'preview' | 'stale'
 
 type SaveToastStatusT = 'saving' | 'saved' | 'error'
 
@@ -50,6 +63,7 @@ export const ViewerScreen = (props: PropsT) => {
   const [viewRotation, setViewRotation] = createSignal<ViewRotationT>(0)
   const [hasPainted, setHasPainted] = createSignal(false)
   const [isSeeking, setIsSeeking] = createSignal(false)
+  const [paintKind, setPaintKind] = createSignal<PaintKindT>('stale')
   const [decodeError, setDecodeError] = createSignal<string | null>(null)
   let rootRef: HTMLDivElement | undefined
   let canvasRef: HTMLCanvasElement | undefined
@@ -61,31 +75,44 @@ export const ViewerScreen = (props: PropsT) => {
 
   // ---- painting ----
 
-  const paint = (bitmap: ImageBitmap, rotation: ViewRotationT) => {
+  const applyViewRotation = (ctx: CanvasRenderingContext2D, rotation: ViewRotationT, width: number, height: number) => {
+    if (rotation === 90) {
+      ctx.translate(width, 0)
+      ctx.rotate(Math.PI / 2)
+      return
+    }
+    if (rotation === 180) {
+      ctx.translate(width, height)
+      ctx.rotate(Math.PI)
+      return
+    }
+    if (rotation === 270) {
+      ctx.translate(0, height)
+      ctx.rotate(-Math.PI / 2)
+    }
+  }
+
+  const paint = (source: PaintSourceT, rotation: ViewRotationT) => {
     if (!canvasRef) return
     const isSideways = rotation === 90 || rotation === 270
-    const width = isSideways ? bitmap.height : bitmap.width
-    const height = isSideways ? bitmap.width : bitmap.height
-    if (canvasRef.width !== width) canvasRef.width = width
-    if (canvasRef.height !== height) canvasRef.height = height
+    const canvasWidth = isSideways ? source.height : source.width
+    const canvasHeight = isSideways ? source.width : source.height
+    if (canvasRef.width !== canvasWidth) canvasRef.width = canvasWidth
+    if (canvasRef.height !== canvasHeight) canvasRef.height = canvasHeight
 
     const ctx = canvasRef.getContext('2d')
     if (!ctx) return
+
     ctx.clearRect(0, 0, canvasRef.width, canvasRef.height)
     ctx.save()
-    if (rotation === 90) {
-      ctx.translate(canvasRef.width, 0)
-      ctx.rotate(Math.PI / 2)
-    } else if (rotation === 180) {
-      ctx.translate(canvasRef.width, canvasRef.height)
-      ctx.rotate(Math.PI)
-    } else if (rotation === 270) {
-      ctx.translate(0, canvasRef.height)
-      ctx.rotate(-Math.PI / 2)
-    }
-    ctx.drawImage(bitmap, 0, 0)
+    applyViewRotation(ctx, rotation, canvasRef.width, canvasRef.height)
+    ctx.drawImage(source.image, 0, 0, source.width, source.height)
     ctx.restore()
     setHasPainted(true)
+  }
+
+  const paintBitmap = (bitmap: ImageBitmap, rotation: ViewRotationT) => {
+    paint({ image: bitmap, width: bitmap.width, height: bitmap.height }, rotation)
   }
 
   // Draws the best frame already in memory. During a fast scrub that is a
@@ -94,14 +121,89 @@ export const ViewerScreen = (props: PropsT) => {
   const paintBestAvailable = (i: number, rotation: ViewRotationT) => {
     const exact = props.source.getCached(i)
     if (exact) {
-      paint(exact, rotation)
+      paintBitmap(exact, rotation)
+      setPaintKind('exact')
       return true
     }
 
     const nearby = props.source.getNearestCached(i, MAX_STALE_FRAME_DISTANCE)
-    if (nearby) paint(nearby, rotation)
+    if (!nearby) return false
+
+    paintBitmap(nearby, rotation)
+    setPaintKind('stale')
     return false
   }
+
+  // ---- native preview ----
+
+  // The browser's own decoder answers a seek far sooner than a cold GOP walk
+  // through WebCodecs, so it carries the picture while a drag is in flight.
+  // It is never the authority on which frame is which — currentTime is a
+  // time, not an index — so the exact frame paints over it on arrival.
+  let preview: VideoPreviewT | null = null
+
+  const halfFrameSec = () => 0.5 / props.info.fps
+
+  // Fitted to the same box the decoded frames use, so handing off between the
+  // two sources doesn't resize the canvas. Measured off the element rather
+  // than off info, because the browser has already applied the container's
+  // rotation to what it will hand us.
+  const getPreviewDrawSize = (element: HTMLVideoElement) => {
+    const scrubSize = getScrubSize(props.info)
+    const boxMaxDim = Math.max(scrubSize.outW, scrubSize.outH)
+    const naturalMaxDim = Math.max(element.videoWidth, element.videoHeight)
+    const scale = Math.min(1, boxMaxDim / naturalMaxDim)
+
+    return {
+      width: Math.max(2, Math.round(element.videoWidth * scale)),
+      height: Math.max(2, Math.round(element.videoHeight * scale)),
+    }
+  }
+
+  const paintPreview = (rotation: ViewRotationT) => {
+    if (!preview) return
+    const element = preview.element
+    const drawSize = getPreviewDrawSize(element)
+    paint({ image: element, width: drawSize.width, height: drawSize.height }, rotation)
+    setPaintKind('preview')
+  }
+
+  // The preview may already be sitting on the requested time — after a view
+  // rotation, or when the neighbour cache missed but the video never moved.
+  // Repainting it costs nothing and beats waiting on a seek that the
+  // controller will correctly decline to issue.
+  const paintPreviewIfCurrent = (timeSec: number, rotation: ViewRotationT) => {
+    const isUsable = preview?.isUsable() ?? false
+    if (!isUsable || !preview) return
+
+    const isShowingTime = Math.abs(preview.element.currentTime - timeSec) < halfFrameSec()
+    if (!isShowingTime) return
+    paintPreview(rotation)
+  }
+
+  const handlePreviewPresented = () => {
+    // An exact frame for this index outranks anything the preview holds.
+    const hasExactFrame = props.source.getCached(index()) !== null
+    if (hasExactFrame) return
+    paintPreview(viewRotation())
+  }
+
+  onMount(() => {
+    preview = createVideoPreview({
+      file: props.file,
+      info: props.info,
+      onPresented: handlePreviewPresented,
+    })
+
+    preview.seekTo(0)
+  })
+
+  onCleanup(() => {
+    preview?.destroy()
+    preview = null
+  })
+
+  // ---- exact frames ----
 
   let settleTimer: ReturnType<typeof setTimeout> | undefined
   onCleanup(() => {
@@ -115,7 +217,8 @@ export const ViewerScreen = (props: PropsT) => {
       if (!isStillCurrent) return
       if (!bitmap) return
 
-      paint(bitmap, viewRotation())
+      paintBitmap(bitmap, viewRotation())
+      setPaintKind('exact')
       setIsSeeking(false)
       setDecodeError(null)
     } catch {
@@ -140,6 +243,10 @@ export const ViewerScreen = (props: PropsT) => {
     }
 
     setIsSeeking(true)
+
+    const targetTimeSec = props.source.getTimeSec(i)
+    paintPreviewIfCurrent(targetTimeSec, rotation)
+    preview?.seekTo(targetTimeSec)
     scheduleExactFrame(i)
   })
 
@@ -316,7 +423,7 @@ export const ViewerScreen = (props: PropsT) => {
       <canvas
         ref={canvasRef}
         class="frame-canvas"
-        classList={{ 'is-hidden': !hasPainted(), 'is-seeking': isSeeking() }}
+        classList={{ 'is-hidden': !hasPainted(), 'is-provisional': paintKind() === 'stale' }}
       />
 
       <Show when={!hasPainted()}>

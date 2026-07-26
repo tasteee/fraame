@@ -239,9 +239,25 @@ body {
   display: none;
 }
 
-/* While the exact frame is still decoding the canvas is showing a neighbour,
-   so it is dimmed a touch to read as provisional rather than final. */
-.frame-canvas.is-seeking {
+/* The native decoder that carries the picture mid-scrub. Everything is drawn
+   through .frame-canvas, so this element is only ever a frame source — it is
+   clipped rather than hidden because display:none stops a video presenting
+   frames at all, which is the one thing it is here to do. */
+.preview-video {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+  z-index: -1;
+}
+
+/* Only when the canvas is holding a neighbouring frame from the cache — a
+   picture from the wrong moment — is it dimmed to read as provisional. The
+   native preview is the right moment and stays at full strength. */
+.frame-canvas.is-provisional {
   opacity: 0.55;
 }
 

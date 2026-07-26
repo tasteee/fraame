@@ -1,11 +1,5 @@
 import type { WebDemuxer } from 'web-demuxer'
-import { displaySize, drawRotated, getFrameCount, type RotationDrawTargetT, type VideoInfoT } from './video'
-
-// Scrub proxies only have to look right on screen; the download path always
-// re-decodes at full resolution. Keeping the proxy well under display size is
-// what lets a useful number of frames fit in the cache at once, and smaller
-// frames also make each transferToImageBitmap noticeably cheaper on phones.
-const SCRUB_MAX_DIM = 960
+import { drawRotated, getFrameCount, getScrubSize, type RotationDrawTargetT, type VideoInfoT } from './video'
 
 // ImageBitmaps are GPU-backed and large, so the cache is bounded by total
 // pixels rather than by frame count.
@@ -15,7 +9,11 @@ const MAX_CACHED_PIXELS = 64_000_000
 // on the way there is kept: reaching the requested frame already required
 // decoding its whole GOP, so discarding those frames only guarantees paying
 // for them again on the next small nudge.
-const DECODE_AHEAD = 48
+//
+// This no longer sits between the caller and its frame — requestFrame resolves
+// on arrival, not on drain — but the trailing flush still delays the *next*
+// seek, so the window stays modest.
+const DECODE_AHEAD = 24
 
 // Seeking lands on the keyframe at or before this point, so nudging back by a
 // hair keeps a request that sits exactly on a keyframe from overshooting.
@@ -46,9 +44,7 @@ export const createFrameSource = (params: FrameSourceParamsT): FrameSourceT => {
   const info = params.info
   const frameCount = getFrameCount(info)
 
-  const deviceMaxDim = Math.round(Math.max(window.innerWidth, window.innerHeight) * (window.devicePixelRatio || 1))
-  const scrubMaxDim = Math.min(SCRUB_MAX_DIM, deviceMaxDim)
-  const size = displaySize(info, scrubMaxDim)
+  const size = getScrubSize(info)
   const pixelsPerFrame = size.outW * size.outH
 
   const canvas = new OffscreenCanvas(size.outW, size.outH)
@@ -146,6 +142,50 @@ export const createFrameSource = (params: FrameSourceParamsT): FrameSourceT => {
   let queuedIndex: number | null = null
   let runningPump: Promise<void> | null = null
 
+  // ---- arrival waiters ----
+
+  // The frame a caller asked for is usually decoded long before the read-ahead
+  // window finishes draining. Waiting for the drain is what made a seek feel
+  // slow on Android, where MediaCodec turns a couple dozen trailing frames
+  // into real milliseconds. These let requestFrame settle the moment its own
+  // frame lands, while the read-ahead keeps filling the cache behind it.
+  type FrameWaiterT = {
+    arrival: Promise<ImageBitmap>
+    dispose: () => void
+  }
+
+  const frameWaiters = new Map<number, Set<(bitmap: ImageBitmap) => void>>()
+
+  const notifyFrameWaiters = (index: number, bitmap: ImageBitmap) => {
+    const waiters = frameWaiters.get(index)
+    if (!waiters) return
+
+    frameWaiters.delete(index)
+    for (const resolve of waiters) resolve(bitmap)
+  }
+
+  const createFrameWaiter = (index: number): FrameWaiterT => {
+    let resolveArrival: (bitmap: ImageBitmap) => void = () => {}
+
+    const arrival = new Promise<ImageBitmap>((resolve) => {
+      resolveArrival = resolve
+    })
+
+    const existing = frameWaiters.get(index)
+    if (existing) existing.add(resolveArrival)
+    if (!existing) frameWaiters.set(index, new Set([resolveArrival]))
+
+    const dispose = () => {
+      const waiters = frameWaiters.get(index)
+      if (!waiters) return
+
+      waiters.delete(resolveArrival)
+      if (waiters.size === 0) frameWaiters.delete(index)
+    }
+
+    return { arrival, dispose }
+  }
+
   const captureFrame = (frame: VideoFrame, index: number) => {
     drawRotated(drawTarget, frame)
     putCached(index, canvas.transferToImageBitmap())
@@ -167,9 +207,14 @@ export const createFrameSource = (params: FrameSourceParamsT): FrameSourceT => {
 
   const handleDecodedFrame = (frame: VideoFrame) => {
     const frameIndex = toFrameIndex(frame.timestamp, decodeBaseUs)
-    const isAlreadyCached = cache.has(frameIndex)
-    if (!isAlreadyCached && !isDestroyed) captureFrame(frame, frameIndex)
+    const shouldCapture = !cache.has(frameIndex) && !isDestroyed
+    if (shouldCapture) captureFrame(frame, frameIndex)
     frame.close()
+
+    // Read back rather than trusting the capture: putCached runs eviction, so
+    // in a pathological case the bitmap just added may already be gone.
+    const stored = cache.get(frameIndex)
+    if (stored) notifyFrameWaiters(frameIndex, stored)
   }
 
   const discardDecoder = () => {
@@ -274,6 +319,15 @@ export const createFrameSource = (params: FrameSourceParamsT): FrameSourceT => {
     return runningPump
   }
 
+  // A pump already on its final tick when a request arrives can settle without
+  // ever seeing it, which used to strand the caller on a frame that never
+  // decoded. Chaining a fresh pump behind the running one closes that gap.
+  const pumpUntilIdle = async (): Promise<void> => {
+    await pump()
+    if (queuedIndex === null) return
+    await pumpUntilIdle()
+  }
+
   const requestFrame = async (index: number): Promise<ImageBitmap | null> => {
     if (isDestroyed) return null
     lastRequestedIndex = index
@@ -282,13 +336,26 @@ export const createFrameSource = (params: FrameSourceParamsT): FrameSourceT => {
     if (cached) return cached
 
     queuedIndex = index
-    await pump()
-    return cache.get(index) ?? null
+
+    const waiter = createFrameWaiter(index)
+
+    // The second branch covers everything arrival can't: a frame index past
+    // the end of the stream, a timestamp that rounds to a neighbour, a decode
+    // that fails. Race rejection is handled by the race itself, so a pump
+    // failure that loses to an arrival can't surface as an unhandled one.
+    const drained = pumpUntilIdle().then(() => cache.get(index) ?? null)
+
+    try {
+      return await Promise.race([waiter.arrival, drained])
+    } finally {
+      waiter.dispose()
+    }
   }
 
   const destroy = () => {
     isDestroyed = true
     queuedIndex = null
+    frameWaiters.clear()
     discardDecoder()
     for (const bitmap of cache.values()) bitmap.close()
     cache.clear()
