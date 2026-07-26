@@ -232,10 +232,42 @@ body {
   max-height: 100dvh;
   width: auto;
   height: auto;
+  transition: opacity 120ms ease-out;
 }
 
 .frame-canvas.is-hidden {
   display: none;
+}
+
+/* While the exact frame is still decoding the canvas is showing a neighbour,
+   so it is dimmed a touch to read as provisional rather than final. */
+.frame-canvas.is-seeking {
+  opacity: 0.55;
+}
+
+.seeking-marker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.seeking-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.6;
+  animation: seeking-pulse 900ms ease-in-out infinite;
+}
+
+@keyframes seeking-pulse {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 0.9;
+  }
 }
 
 .viewer-loading {

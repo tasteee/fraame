@@ -19,7 +19,13 @@ const VIEW_ROTATIONS = [0, 90, 180, 270] as const
 
 // Mid-drag the index changes on every pointer event. Waiting for it to settle
 // keeps a fast scrub from queueing a decode for frames nobody will look at.
-const DECODE_SETTLE_MS = 70
+const DECODE_SETTLE_MS = 55
+
+// Painting a decoded neighbour is what makes a fast scrub read as slightly
+// soft rather than stalled, but only while the neighbour is actually nearby.
+// Past this distance it is a frame from somewhere else in the video, and
+// showing it silently is worse than admitting we're still seeking.
+const MAX_STALE_FRAME_DISTANCE = 45
 
 type ViewRotationT = (typeof VIEW_ROTATIONS)[number]
 
@@ -43,6 +49,7 @@ export const ViewerScreen = (props: PropsT) => {
   const [saveToasts, setSaveToasts] = createSignal<SaveToastT[]>([])
   const [viewRotation, setViewRotation] = createSignal<ViewRotationT>(0)
   const [hasPainted, setHasPainted] = createSignal(false)
+  const [isSeeking, setIsSeeking] = createSignal(false)
   const [decodeError, setDecodeError] = createSignal<string | null>(null)
   let rootRef: HTMLDivElement | undefined
   let canvasRef: HTMLCanvasElement | undefined
@@ -91,8 +98,8 @@ export const ViewerScreen = (props: PropsT) => {
       return true
     }
 
-    const nearest = props.source.getNearestCached(i)
-    if (nearest) paint(nearest, rotation)
+    const nearby = props.source.getNearestCached(i, MAX_STALE_FRAME_DISTANCE)
+    if (nearby) paint(nearby, rotation)
     return false
   }
 
@@ -104,10 +111,15 @@ export const ViewerScreen = (props: PropsT) => {
   const resolveExactFrame = async (i: number) => {
     try {
       const bitmap = await props.source.requestFrame(i)
-      if (!bitmap || index() !== i) return
+      const isStillCurrent = index() === i
+      if (!isStillCurrent) return
+      if (!bitmap) return
+
       paint(bitmap, viewRotation())
+      setIsSeeking(false)
       setDecodeError(null)
     } catch {
+      setIsSeeking(false)
       setDecodeError('could not decode this part of the video')
     }
   }
@@ -121,7 +133,13 @@ export const ViewerScreen = (props: PropsT) => {
     const i = index()
     const rotation = viewRotation()
     const isExact = paintBestAvailable(i, rotation)
-    if (isExact) return
+
+    if (isExact) {
+      setIsSeeking(false)
+      return
+    }
+
+    setIsSeeking(true)
     scheduleExactFrame(i)
   })
 
@@ -295,7 +313,11 @@ export const ViewerScreen = (props: PropsT) => {
         tapTimes = []
       }}
     >
-      <canvas ref={canvasRef} class="frame-canvas" classList={{ 'is-hidden': !hasPainted() }} />
+      <canvas
+        ref={canvasRef}
+        class="frame-canvas"
+        classList={{ 'is-hidden': !hasPainted(), 'is-seeking': isSeeking() }}
+      />
 
       <Show when={!hasPainted()}>
         <div class="viewer-loading">
@@ -345,6 +367,14 @@ export const ViewerScreen = (props: PropsT) => {
           <z-text size="sm">
             frame {(index() + 1).toLocaleString()} / {frameCount().toLocaleString()}
           </z-text>
+          <Show when={isSeeking() && !decodeError()}>
+            <span class="seeking-marker" aria-live="polite">
+              <span class="seeking-dot" aria-hidden="true" />
+              <z-text size="sm" color="muted">
+                seeking…
+              </z-text>
+            </span>
+          </Show>
           <Show when={decodeError()}>
             <z-badge tone="danger" size="sm" label="decode error"></z-badge>
           </Show>
