@@ -1,13 +1,12 @@
-import { For, Show, createSignal } from "solid-js";
-import { probeVideo, type ProbeResultT } from "../lib/video";
+import { Show, createSignal } from "solid-js";
+import { getFrameCount, probeVideo, type ProbeResultT } from "../lib/video";
 
 type PropsT = {
-  onStart: (file: File, probe: ProbeResultT, extractFps: number) => void;
+  onStart: (file: File, probe: ProbeResultT) => void;
 };
 
 const ACCEPT =
   "video/*,.mp4,.m4v,.mov,.webm,.mkv,.avi,.wmv,.flv,.ts,.mts,.m2ts,.3gp";
-const FPS_OPTIONS = [1, 3, 5, 10, 20, 30, 60, 120, 240];
 
 const formatDuration = (sec: number) => {
   const m = Math.floor(sec / 60);
@@ -20,26 +19,8 @@ export const UploadScreen = (props: PropsT) => {
   const [error, setError] = createSignal<string | null>(null);
   const [isDragging, setIsDragging] = createSignal(false);
   const [probe, setProbe] = createSignal<ProbeResultT | null>(null);
-  const [extractFps, setExtractFps] = createSignal(1);
   let fileRef: File | null = null;
   let inputRef: HTMLInputElement | undefined;
-
-  const maxFps = () => {
-    const info = probe()?.info;
-    return info ? Math.max(1, Math.round(info.fps)) : 1;
-  };
-
-  const estimatedFrames = () => {
-    const info = probe()?.info;
-    return info ? Math.ceil(info.durationSec * extractFps()) : 0;
-  };
-
-  const fpsOptions = () => {
-    const max = maxFps();
-    const options = FPS_OPTIONS.filter((fps) => fps <= max);
-    if (!options.includes(max)) options.push(max);
-    return options;
-  };
 
   const acceptFile = async (file: File | undefined) => {
     if (!file || phase() === "probing") return;
@@ -51,7 +32,6 @@ export const UploadScreen = (props: PropsT) => {
     try {
       const result = await probeVideo(file);
       setProbe(result);
-      setExtractFps(Math.max(1, Math.round(result.info.fps)));
       setPhase("ready");
     } catch (err) {
       setError(
@@ -72,7 +52,7 @@ export const UploadScreen = (props: PropsT) => {
   const start = () => {
     const result = probe();
     if (!result || !fileRef) return;
-    props.onStart(fileRef, result, extractFps());
+    props.onStart(fileRef, result);
   };
 
   return (
@@ -144,7 +124,7 @@ export const UploadScreen = (props: PropsT) => {
 
           <Show when={phase() === "ready" && probe()}>
             {(result) => (
-              <div class="SIMPLIFY_ME clip-options">
+              <div class="clip-options">
                 <div class="clip-info">
                   <strong>{result().info.fileName}</strong>
                   <span>
@@ -154,29 +134,14 @@ export const UploadScreen = (props: PropsT) => {
                   </span>
                 </div>
 
-                <div class="fps-picker" aria-label="Frames per second to extract">
-                  <For each={fpsOptions()}>
-                    {(fps) => (
-                      <button
-                        type="button"
-                        classList={{ "is-selected": extractFps() === fps }}
-                        onClick={() => setExtractFps(fps)}
-                      >
-                        {fps}
-                      </button>
-                    )}
-                  </For>
-                </div>
-
                 <div class="extract-summary">
-                  <span>{estimatedFrames().toLocaleString()} frames</span>
-                  <Show when={estimatedFrames() > 5000}>
-                    <z-badge tone="warning" size="sm" label="large"></z-badge>
-                  </Show>
+                  <span>
+                    {getFrameCount(result().info).toLocaleString()} frames
+                  </span>
                 </div>
 
                 <z-button tone="primary" on:click={start}>
-                  extract
+                  open
                 </z-button>
               </div>
             )}

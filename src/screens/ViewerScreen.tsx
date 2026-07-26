@@ -1,14 +1,11 @@
 import { For, Show, createEffect, createSignal, onCleanup, onMount } from 'solid-js'
-import { createBitmapCache } from '../lib/bitmapCache'
-import { extractFullResFrame, releaseFullResDemuxer, type FrameT, type VideoInfoT } from '../lib/video'
+import type { FrameSourceT } from '../lib/frameSource'
+import { extractFullResFrame, releaseFullResDemuxer, type VideoInfoT } from '../lib/video'
 
 type PropsT = {
   file: File
   info: VideoInfoT
-  frames: FrameT[]
-  frameCount: () => number
-  isExtracting: () => boolean
-  extractError: () => string | null
+  source: FrameSourceT
   onReset: () => void
 }
 
@@ -18,8 +15,11 @@ const COARSE_PX_PER_FRAME = 6
 const FINE_PX_PER_FRAME = 48
 const TAP_MAX_MOVEMENT = 12
 const TAP_MAX_GAP_MS = 450
-const PREFETCH_RADIUS = 20
 const VIEW_ROTATIONS = [0, 90, 180, 270] as const
+
+// Mid-drag the index changes on every pointer event. Waiting for it to settle
+// keeps a fast scrub from queueing a decode for frames nobody will look at.
+const DECODE_SETTLE_MS = 70
 
 type ViewRotationT = (typeof VIEW_ROTATIONS)[number]
 
@@ -42,56 +42,87 @@ export const ViewerScreen = (props: PropsT) => {
   const [index, setIndex] = createSignal(0)
   const [saveToasts, setSaveToasts] = createSignal<SaveToastT[]>([])
   const [viewRotation, setViewRotation] = createSignal<ViewRotationT>(0)
+  const [hasPainted, setHasPainted] = createSignal(false)
+  const [decodeError, setDecodeError] = createSignal<string | null>(null)
   let rootRef: HTMLDivElement | undefined
   let canvasRef: HTMLCanvasElement | undefined
 
-  const cache = createBitmapCache((i) => props.frames[i]?.blob)
-  onCleanup(() => cache.clear())
   onCleanup(() => releaseFullResDemuxer())
 
-  const clampIndex = (i: number) => Math.max(0, Math.min(props.frameCount() - 1, i))
+  const frameCount = () => props.source.frameCount
+  const clampIndex = (i: number) => Math.max(0, Math.min(frameCount() - 1, i))
 
-  let drawSequence = 0
-  const drawRotatedBitmap = (ctx: CanvasRenderingContext2D, bitmap: ImageBitmap, rotation: ViewRotationT) => {
-    const canvas = ctx.canvas
-    ctx.clearRect(0, 0, canvas.width, canvas.height)
-    ctx.save()
-    if (rotation === 90) {
-      ctx.translate(canvas.width, 0)
-      ctx.rotate(Math.PI / 2)
-    } else if (rotation === 180) {
-      ctx.translate(canvas.width, canvas.height)
-      ctx.rotate(Math.PI)
-    } else if (rotation === 270) {
-      ctx.translate(0, canvas.height)
-      ctx.rotate(-Math.PI / 2)
-    }
-    ctx.drawImage(bitmap, 0, 0)
-    ctx.restore()
-  }
+  // ---- painting ----
 
-  const draw = async () => {
-    const i = index()
-    const rotation = viewRotation()
-    if (props.frameCount() === 0) return
-    const sequence = ++drawSequence
-    const bitmap = await cache.load(i)
-    if (!bitmap || sequence !== drawSequence || !canvasRef) return
+  const paint = (bitmap: ImageBitmap, rotation: ViewRotationT) => {
+    if (!canvasRef) return
     const isSideways = rotation === 90 || rotation === 270
     const width = isSideways ? bitmap.height : bitmap.width
     const height = isSideways ? bitmap.width : bitmap.height
     if (canvasRef.width !== width) canvasRef.width = width
     if (canvasRef.height !== height) canvasRef.height = height
+
     const ctx = canvasRef.getContext('2d')
-    if (ctx) drawRotatedBitmap(ctx, bitmap, rotation)
-    cache.prefetch(i, PREFETCH_RADIUS, props.frameCount())
+    if (!ctx) return
+    ctx.clearRect(0, 0, canvasRef.width, canvasRef.height)
+    ctx.save()
+    if (rotation === 90) {
+      ctx.translate(canvasRef.width, 0)
+      ctx.rotate(Math.PI / 2)
+    } else if (rotation === 180) {
+      ctx.translate(canvasRef.width, canvasRef.height)
+      ctx.rotate(Math.PI)
+    } else if (rotation === 270) {
+      ctx.translate(0, canvasRef.height)
+      ctx.rotate(-Math.PI / 2)
+    }
+    ctx.drawImage(bitmap, 0, 0)
+    ctx.restore()
+    setHasPainted(true)
+  }
+
+  // Draws the best frame already in memory. During a fast scrub that is a
+  // near neighbour rather than the exact frame, which reads as a slightly
+  // soft scrub instead of a stalled one.
+  const paintBestAvailable = (i: number, rotation: ViewRotationT) => {
+    const exact = props.source.getCached(i)
+    if (exact) {
+      paint(exact, rotation)
+      return true
+    }
+
+    const nearest = props.source.getNearestCached(i)
+    if (nearest) paint(nearest, rotation)
+    return false
+  }
+
+  let settleTimer: ReturnType<typeof setTimeout> | undefined
+  onCleanup(() => {
+    if (settleTimer) clearTimeout(settleTimer)
+  })
+
+  const resolveExactFrame = async (i: number) => {
+    try {
+      const bitmap = await props.source.requestFrame(i)
+      if (!bitmap || index() !== i) return
+      paint(bitmap, viewRotation())
+      setDecodeError(null)
+    } catch {
+      setDecodeError('could not decode this part of the video')
+    }
+  }
+
+  const scheduleExactFrame = (i: number) => {
+    if (settleTimer) clearTimeout(settleTimer)
+    settleTimer = setTimeout(() => void resolveExactFrame(i), DECODE_SETTLE_MS)
   }
 
   createEffect(() => {
-    index()
-    viewRotation()
-    props.frameCount()
-    void draw()
+    const i = index()
+    const rotation = viewRotation()
+    const isExact = paintBestAvailable(i, rotation)
+    if (isExact) return
+    scheduleExactFrame(i)
   })
 
   // ---- scrub input ----
@@ -221,14 +252,13 @@ export const ViewerScreen = (props: PropsT) => {
 
   const downloadCurrentFrame = async () => {
     const i = index()
-    const frame = props.frames[i]
-    if (!frame) return
     const isAlreadySavingThisFrame = saveToasts().some((entry) => entry.frameIndex === i && entry.status === 'saving')
     if (isAlreadySavingThisFrame) return
 
     const toastId = addSaveToast(i)
     try {
-      const blob = await extractFullResFrame(props.file, props.info, frame.timeSec, viewRotation())
+      const timeSec = props.source.getTimeSec(i)
+      const blob = await extractFullResFrame(props.file, props.info, timeSec, viewRotation())
       const url = URL.createObjectURL(blob)
       const anchor = document.createElement('a')
       const base = props.file.name.replace(/\.[^.]+$/, '')
@@ -246,15 +276,7 @@ export const ViewerScreen = (props: PropsT) => {
 
   // ---- readouts ----
 
-  const currentTimeSec = () => {
-    props.frameCount()
-    return props.frames[index()]?.timeSec ?? 0
-  }
-
-  const totalLabel = () => {
-    const count = props.frameCount().toLocaleString()
-    return props.isExtracting() ? `~${count}` : count
-  }
+  const currentTimeSec = () => props.source.getTimeSec(index())
 
   const rotateView = () => {
     const currentIndex = VIEW_ROTATIONS.indexOf(viewRotation())
@@ -273,23 +295,20 @@ export const ViewerScreen = (props: PropsT) => {
         tapTimes = []
       }}
     >
-      <Show
-        when={props.frameCount() > 0}
-        fallback={
-          <div class="viewer-loading">
-            <Show
-              when={!props.extractError()}
-              fallback={<z-alert tone="danger" heading="extraction failed">{props.extractError()}</z-alert>}
-            >
-              <z-progress is-indeterminate tone="primary" style="width: 100%"></z-progress>
-              <z-text size="sm" color="muted">
-                decoding first frame…
-              </z-text>
-            </Show>
-          </div>
-        }
-      >
-        <canvas ref={canvasRef} class="frame-canvas" />
+      <canvas ref={canvasRef} class="frame-canvas" classList={{ 'is-hidden': !hasPainted() }} />
+
+      <Show when={!hasPainted()}>
+        <div class="viewer-loading">
+          <Show
+            when={!decodeError()}
+            fallback={<z-alert tone="danger" heading="decode failed">{decodeError()}</z-alert>}
+          >
+            <z-progress is-indeterminate tone="primary" style="width: 100%"></z-progress>
+            <z-text size="sm" color="muted">
+              decoding first frame…
+            </z-text>
+          </Show>
+        </div>
       </Show>
 
       <div class="overlay top-left" onPointerDown={(event) => event.stopPropagation()}>
@@ -300,49 +319,44 @@ export const ViewerScreen = (props: PropsT) => {
         </div>
       </div>
 
-      <Show when={props.frameCount() > 0}>
-        <div class="overlay top-right" onPointerDown={(event) => event.stopPropagation()}>
-          <button
-            type="button"
-            class="hud-button"
-            aria-label={`Rotate frame view, currently ${viewRotation()} degrees`}
-            title={`Rotate view (${viewRotation()} degrees)`}
-            onClick={rotateView}
-          >
-            <span aria-hidden="true">↻</span>
-            <span>{viewRotation()}°</span>
-          </button>
-        </div>
+      <div class="overlay top-right" onPointerDown={(event) => event.stopPropagation()}>
+        <button
+          type="button"
+          class="hud-button"
+          aria-label={`Rotate frame view, currently ${viewRotation()} degrees`}
+          title={`Rotate view (${viewRotation()} degrees)`}
+          onClick={rotateView}
+        >
+          <span aria-hidden="true">↻</span>
+          <span>{viewRotation()}°</span>
+        </button>
+      </div>
 
-        <div class="overlay top-center">
-          <div class="hud">
-            <z-text size="sm">
-              {formatTime(currentTimeSec())} / {formatTime(props.info.durationSec)}
-            </z-text>
-          </div>
+      <div class="overlay top-center">
+        <div class="hud">
+          <z-text size="sm">
+            {formatTime(currentTimeSec())} / {formatTime(props.info.durationSec)}
+          </z-text>
         </div>
+      </div>
 
-        <div class="overlay bottom-center">
-          <div class="hud">
-            <z-text size="sm">
-              frame {(index() + 1).toLocaleString()} / {totalLabel()}
-            </z-text>
-            <Show when={props.isExtracting()}>
-              <z-badge tone="info" size="sm" label="extracting…"></z-badge>
-            </Show>
-            <Show when={props.extractError()}>
-              <z-badge tone="danger" size="sm" label="extraction stopped early"></z-badge>
-            </Show>
-          </div>
-          <For each={saveToasts()}>
-            {(entry) => (
-              <div class="hud">
-                <z-text size="sm">{getSaveToastLabel(entry)}</z-text>
-              </div>
-            )}
-          </For>
+      <div class="overlay bottom-center">
+        <div class="hud">
+          <z-text size="sm">
+            frame {(index() + 1).toLocaleString()} / {frameCount().toLocaleString()}
+          </z-text>
+          <Show when={decodeError()}>
+            <z-badge tone="danger" size="sm" label="decode error"></z-badge>
+          </Show>
         </div>
-      </Show>
+        <For each={saveToasts()}>
+          {(entry) => (
+            <div class="hud">
+              <z-text size="sm">{getSaveToastLabel(entry)}</z-text>
+            </div>
+          )}
+        </For>
+      </div>
     </div>
   )
 }

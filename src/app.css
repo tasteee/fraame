@@ -118,7 +118,7 @@ body {
 
 .clip-options {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 12px;
   width: 100%;
@@ -149,32 +149,6 @@ body {
 .extract-summary {
   color: var(--muted-foreground);
   font-size: 0.82rem;
-}
-
-.fps-picker {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  justify-content: flex-end;
-}
-
-.fps-picker button {
-  min-width: 34px;
-  height: 30px;
-  padding: 0 9px;
-  color: var(--muted-foreground);
-  font: 700 0.78rem var(--font-sans);
-  cursor: pointer;
-  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--background-light) 48%, transparent);
-}
-
-.fps-picker button:hover,
-.fps-picker button.is-selected {
-  color: var(--foreground);
-  border-color: color-mix(in srgb, var(--accent) 76%, var(--border));
-  background: color-mix(in srgb, var(--accent) 24%, transparent);
 }
 
 .extract-summary {
@@ -227,10 +201,6 @@ body {
     grid-template-columns: 1fr;
     align-items: stretch;
   }
-
-  .fps-picker {
-    justify-content: flex-start;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -262,6 +232,10 @@ body {
   max-height: 100dvh;
   width: auto;
   height: auto;
+}
+
+.frame-canvas.is-hidden {
+  display: none;
 }
 
 .viewer-loading {

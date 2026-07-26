@@ -1,6 +1,6 @@
 import { WebDemuxer } from 'web-demuxer'
 
-const wasmLoaderPath = new URL('/wasm-files/ffmpeg.js', globalThis.location.href).href
+export const wasmLoaderPath = new URL('/wasm-files/ffmpeg.js', globalThis.location.href).href
 
 export type VideoInfoT = {
   fileName: string
@@ -17,11 +17,6 @@ export type ProbeResultT = {
   info: VideoInfoT
 }
 
-export type FrameT = {
-  blob: Blob
-  timeSec: number
-}
-
 const parseRational = (value: string | undefined): number => {
   if (!value) return 0
   const [num, den] = value.split('/').map(Number)
@@ -30,9 +25,16 @@ const parseRational = (value: string | undefined): number => {
   return num / den
 }
 
-const normalizeRotation = (value: number): number => {
+export const normalizeRotation = (value: number): number => {
   const r = Math.round(value / 90) * 90
   return ((r % 360) + 360) % 360
+}
+
+// Total frames the file is expected to hold. Derived from fps and duration
+// rather than counted, so the viewer knows its range the moment the probe
+// finishes instead of after a full decode pass.
+export const getFrameCount = (info: VideoInfoT): number => {
+  return Math.max(1, Math.floor(info.durationSec * info.fps))
 }
 
 export async function probeVideo(file: File): Promise<ProbeResultT> {
@@ -47,6 +49,14 @@ export async function probeVideo(file: File): Promise<ProbeResultT> {
     const durationSec = stream.duration > 0 ? stream.duration : mediaInfo.duration
 
     if (!fps || !durationSec) throw new Error('Could not read the frame rate or duration of this video.')
+
+    // Checked here rather than at first decode so an unsupported codec is
+    // reported while the user is still on the upload screen.
+    const config = await demuxer.getVideoDecoderConfig()
+    const support = await VideoDecoder.isConfigSupported(config).catch(() => null)
+    if (!support?.supported) {
+      throw new Error(`This browser can't decode ${stream.codec_name || 'this'} video.`)
+    }
 
     return {
       demuxer,
@@ -66,14 +76,14 @@ export async function probeVideo(file: File): Promise<ProbeResultT> {
   }
 }
 
-type RotationDrawTargetT = {
+export type RotationDrawTargetT = {
   ctx: OffscreenCanvasRenderingContext2D
   rotation: number
   outW: number
   outH: number
 }
 
-const drawRotated = (target: RotationDrawTargetT, source: CanvasImageSource) => {
+export const drawRotated = (target: RotationDrawTargetT, source: CanvasImageSource) => {
   const { ctx, rotation, outW, outH } = target
   const swapped = rotation === 90 || rotation === 270
   const dw = swapped ? outH : outW
@@ -93,7 +103,7 @@ const drawRotated = (target: RotationDrawTargetT, source: CanvasImageSource) => 
   ctx.restore()
 }
 
-const displaySize = (info: VideoInfoT, maxDim: number) => {
+export const displaySize = (info: VideoInfoT, maxDim: number) => {
   const swapped = info.rotation === 90 || info.rotation === 270
   const naturalW = swapped ? info.height : info.width
   const naturalH = swapped ? info.width : info.height
@@ -104,143 +114,17 @@ const displaySize = (info: VideoInfoT, maxDim: number) => {
   }
 }
 
-export type ExtractParamsT = {
-  demuxer: WebDemuxer
-  info: VideoInfoT
-  extractFps: number
-  maxDim: number
-  signal: AbortSignal
-  onFrame: (frame: FrameT) => void
-}
-
-// Decodes every frame via WebCodecs (no <video> seeking, so nothing can be
-// dropped or throttled), keeps only frames that cross the next target
-// timestamp, downscales each kept frame to display size, and compresses it
-// to a small blob. Backpressure caps how many raw VideoFrames are alive at
-// once so GPU memory stays flat even on 4K sources.
-export async function extractFrames(params: ExtractParamsT): Promise<void> {
-  const { demuxer, info, extractFps, signal, onFrame } = params
-
-  const config = await demuxer.getVideoDecoderConfig()
-  const support = await VideoDecoder.isConfigSupported(config).catch(() => null)
-  if (!support?.supported) {
-    throw new Error(`This browser can't decode ${info.codecName || 'this'} video.`)
-  }
-
-  const { outW, outH } = displaySize(info, params.maxDim)
-  const canvas = new OffscreenCanvas(outW, outH)
-  const ctx = canvas.getContext('2d')
-  if (!ctx) throw new Error('Could not create a canvas context.')
-  const target: RotationDrawTargetT = { ctx, rotation: info.rotation, outW, outH }
-
-  const stepUs = 1e6 / extractFps
-  let firstTsUs: number | null = null
-  let nextTargetUs = 0
-  let mime = 'image/webp'
-
-  const encodeQueue: VideoFrame[] = []
-  let pumping = false
-  let pipelineError: Error | null = null
-
-  const pump = async () => {
-    if (pumping) return
-    pumping = true
-    try {
-      while (encodeQueue.length > 0) {
-        const frame = encodeQueue.shift()!
-        const timeSec = (frame.timestamp - firstTsUs!) / 1e6
-        drawRotated(target, frame)
-        frame.close()
-        if (signal.aborted) return
-        let blob = await canvas.convertToBlob({ type: mime, quality: 0.82 })
-        if (mime === 'image/webp' && blob.type !== 'image/webp') {
-          // Safari can't encode webp; it silently falls back. Use jpeg instead.
-          mime = 'image/jpeg'
-          blob = await canvas.convertToBlob({ type: mime, quality: 0.85 })
-        }
-        if (signal.aborted) return
-        onFrame({ blob, timeSec })
-      }
-    } catch (error) {
-      pipelineError = error as Error
-    } finally {
-      pumping = false
-    }
-  }
-
-  const decoder = new VideoDecoder({
-    output: (frame) => {
-      if (signal.aborted || pipelineError) {
-        frame.close()
-        return
-      }
-      const ts = frame.timestamp
-      if (firstTsUs === null) {
-        firstTsUs = ts
-        nextTargetUs = ts
-      }
-      if (ts >= nextTargetUs - 1) {
-        do {
-          nextTargetUs += stepUs
-        } while (nextTargetUs <= ts + 1)
-        encodeQueue.push(frame)
-        void pump()
-      } else {
-        frame.close()
-      }
-    },
-    error: (error) => {
-      pipelineError = error as Error
-    },
-  })
-  decoder.configure({ ...config, hardwareAcceleration: 'prefer-hardware' })
-
-  const waitFor = (condition: () => boolean) =>
-    new Promise<void>((resolve) => {
-      const tick = () => {
-        if (condition() || signal.aborted || pipelineError) resolve()
-        else setTimeout(tick, 8)
-      }
-      tick()
-    })
-
-  const reader = demuxer.readVideoPacket().getReader()
-  try {
-    while (!signal.aborted && !pipelineError) {
-      const { done, value } = await reader.read()
-      if (done) break
-      decoder.decode(demuxer.genEncodedVideoChunk(value))
-      if (decoder.decodeQueueSize > 16 || encodeQueue.length > 4) {
-        await waitFor(() => decoder.decodeQueueSize <= 8 && encodeQueue.length <= 2)
-      }
-    }
-    if (!signal.aborted && !pipelineError) {
-      await decoder.flush()
-      await waitFor(() => encodeQueue.length === 0 && !pumping)
-    }
-  } finally {
-    reader.cancel().catch(() => {})
-    try {
-      decoder.close()
-    } catch {
-      // already closed by an error
-    }
-    for (const frame of encodeQueue.splice(0)) frame.close()
-  }
-
-  if (pipelineError && !signal.aborted) throw pipelineError
-}
-
 type FullResDemuxerCacheT = {
   file: File
   demuxer: WebDemuxer
   baseUs: number
 }
 
-// Spinning up a WebDemuxer means starting a dedicated Worker and
-// compiling the ~4MB ffmpeg WASM module from scratch, so this is kept
-// alive and reused across every full-res download for the same file
-// instead of paying that cost on every triple-tap.
+// Spinning up a WebDemuxer means starting a dedicated Worker and compiling
+// the ~4MB ffmpeg WASM module from scratch, so this is kept alive and reused
+// across every full-res download for the same file. It stays separate from
+// the scrubbing demuxer because a single demuxer can only serve one packet
+// reader at a time.
 let fullResCache: FullResDemuxerCacheT | null = null
 
 const createFullResDemuxer = async (file: File): Promise<FullResDemuxerCacheT> => {
@@ -265,8 +149,8 @@ const getFullResDemuxer = async (file: File): Promise<FullResDemuxerCacheT> => {
   return fullResCache
 }
 
-// Releases the cached full-res demuxer. Call this when the viewer for
-// a file is torn down so its worker doesn't linger in the background.
+// Releases the cached full-res demuxer. Call this when the viewer for a file
+// is torn down so its worker doesn't linger in the background.
 export const releaseFullResDemuxer = (): void => {
   fullResCache?.demuxer.destroy()
   fullResCache = null
@@ -274,8 +158,7 @@ export const releaseFullResDemuxer = (): void => {
 
 // Re-decodes a single frame from the original file at full resolution and
 // returns it as a PNG. Reuses a cached demuxer instance (see above) so it
-// can run while the main extraction is still in progress without paying
-// for a fresh WASM instance on every call.
+// doesn't pay for a fresh WASM instance on every call.
 export const extractFullResFrame = async (
   file: File,
   info: VideoInfoT,
