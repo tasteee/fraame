@@ -1,33 +1,34 @@
-import { WebDemuxer } from 'web-demuxer'
+import { ALL_FORMATS, BlobSource, Input, VideoSampleSink, type InputVideoTrack, type Rotation } from 'mediabunny'
 
-export const wasmLoaderPath = new URL('/wasm-files/ffmpeg.js', globalThis.location.href).href
-
+// Dimensions here are always *display* dimensions: mediabunny has already
+// applied the container's rotation and pixel aspect ratio, so nothing
+// downstream has to swap width and height for a portrait clip.
 export type VideoInfoT = {
   fileName: string
-  width: number
-  height: number
-  rotation: number
+  displayWidth: number
+  displayHeight: number
+  rotation: Rotation
   fps: number
   durationSec: number
+  firstTimestampSec: number
   codecName: string
 }
 
 export type ProbeResultT = {
-  demuxer: WebDemuxer
+  input: Input
+  track: InputVideoTrack
   info: VideoInfoT
 }
 
-const parseRational = (value: string | undefined): number => {
-  if (!value) return 0
-  const [num, den] = value.split('/').map(Number)
-  if (den === undefined) return Number(value) || 0
-  if (!num || !den) return 0
-  return num / den
-}
+// Frame rate is estimated from a sample of packets rather than the whole
+// track. A few hundred is plenty to recognise 24/25/30/60 and keeps the probe
+// from reading the entire file before the upload screen can respond.
+const FPS_SAMPLE_PACKETS = 300
 
-export const normalizeRotation = (value: number): number => {
-  const r = Math.round(value / 90) * 90
-  return ((r % 360) + 360) % 360
+export const normalizeRotation = (value: number): Rotation => {
+  const quarters = Math.round(value / 90) * 90
+  const wrapped = ((quarters % 360) + 360) % 360
+  return wrapped as Rotation
 }
 
 // Total frames the file is expected to hold. Derived from fps and duration
@@ -37,70 +38,77 @@ export const getFrameCount = (info: VideoInfoT): number => {
   return Math.max(1, Math.floor(info.durationSec * info.fps))
 }
 
-export async function probeVideo(file: File): Promise<ProbeResultT> {
-  const demuxer = new WebDemuxer({ wasmLoaderPath })
+// Timestamps in a track do not necessarily start at zero, and every sink here
+// is addressed in absolute track time.
+export const getAbsoluteTimeSec = (info: VideoInfoT, index: number): number => {
+  return info.firstTimestampSec + index / info.fps
+}
+
+// Reading the duration out of the container header is a couple of hundred
+// bytes; computing it walks every packet. Worth trying the cheap path first,
+// because on a long .mkv the difference is the whole upload screen.
+const readDuration = async (track: InputVideoTrack): Promise<number> => {
+  const declared = await track.getDurationFromMetadata()
+  const isUsable = declared !== null && declared > 0
+  if (isUsable) return declared as number
+  return await track.computeDuration()
+}
+
+export const probeVideo = async (file: File): Promise<ProbeResultT> => {
+  const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(file) })
+
   try {
-    await demuxer.load(file)
-    const stream = await demuxer.getVideoStream()
-    if (!stream || !stream.width) throw new Error('No video stream found in this file.')
-
-    const mediaInfo = await demuxer.getMediaInfo()
-    const fps = parseRational(stream.avg_frame_rate) || parseRational(stream.r_frame_rate)
-    const durationSec = stream.duration > 0 ? stream.duration : mediaInfo.duration
-
-    if (!fps || !durationSec) throw new Error('Could not read the frame rate or duration of this video.')
+    const track = await input.getPrimaryVideoTrack()
+    if (!track) throw new Error('No video stream found in this file.')
 
     // Checked here rather than at first decode so an unsupported codec is
     // reported while the user is still on the upload screen.
-    const config = await demuxer.getVideoDecoderConfig()
-    const support = await VideoDecoder.isConfigSupported(config).catch(() => null)
-    if (!support?.supported) {
-      throw new Error(`This browser can't decode ${stream.codec_name || 'this'} video.`)
+    const canDecode = await track.canDecode()
+    if (!canDecode) {
+      const codecName = track.codec ?? 'this'
+      throw new Error(`This browser can't decode ${codecName} video.`)
     }
 
+    const [durationSec, displayWidth, displayHeight, rotation, firstTimestampSec, packetStats] = await Promise.all([
+      readDuration(track),
+      track.getDisplayWidth(),
+      track.getDisplayHeight(),
+      track.getRotation(),
+      track.getFirstTimestamp(),
+      track.computePacketStats(FPS_SAMPLE_PACKETS),
+    ])
+
+    const fps = packetStats.averagePacketRate
+    if (!fps || !durationSec) throw new Error('Could not read the frame rate or duration of this video.')
+
     return {
-      demuxer,
+      input,
+      track,
       info: {
         fileName: file.name,
-        width: stream.width,
-        height: stream.height,
-        rotation: normalizeRotation(stream.rotation ?? 0),
+        displayWidth,
+        displayHeight,
+        rotation,
         fps,
         durationSec,
-        codecName: stream.codec_name,
+        firstTimestampSec,
+        codecName: track.codec ?? 'unknown',
       },
     }
   } catch (error) {
-    demuxer.destroy()
+    input.dispose()
     throw error
   }
 }
 
-export type RotationDrawTargetT = {
-  ctx: OffscreenCanvasRenderingContext2D
-  rotation: number
-  outW: number
-  outH: number
-}
+export const displaySize = (info: VideoInfoT, maxDim: number) => {
+  const largestSide = Math.max(info.displayWidth, info.displayHeight)
+  const scale = Math.min(1, maxDim / largestSide)
 
-export const drawRotated = (target: RotationDrawTargetT, source: CanvasImageSource) => {
-  const { ctx, rotation, outW, outH } = target
-  const swapped = rotation === 90 || rotation === 270
-  const dw = swapped ? outH : outW
-  const dh = swapped ? outW : outH
-  ctx.save()
-  if (rotation === 90) {
-    ctx.translate(outW, 0)
-    ctx.rotate(Math.PI / 2)
-  } else if (rotation === 180) {
-    ctx.translate(outW, outH)
-    ctx.rotate(Math.PI)
-  } else if (rotation === 270) {
-    ctx.translate(0, outH)
-    ctx.rotate(-Math.PI / 2)
+  return {
+    outW: Math.max(2, Math.round(info.displayWidth * scale)),
+    outH: Math.max(2, Math.round(info.displayHeight * scale)),
   }
-  ctx.drawImage(source, 0, 0, dw, dh)
-  ctx.restore()
 }
 
 // Scrub proxies only have to look right on screen; the download path always
@@ -118,130 +126,38 @@ export const getScrubSize = (info: VideoInfoT) => {
   return displaySize(info, scrubMaxDim)
 }
 
-export const displaySize = (info: VideoInfoT, maxDim: number) => {
-  const swapped = info.rotation === 90 || info.rotation === 270
-  const naturalW = swapped ? info.height : info.width
-  const naturalH = swapped ? info.width : info.height
-  const scale = Math.min(1, maxDim / Math.max(naturalW, naturalH))
-  return {
-    outW: Math.max(2, Math.round(naturalW * scale)),
-    outH: Math.max(2, Math.round(naturalH * scale)),
-  }
-}
-
-type FullResDemuxerCacheT = {
-  file: File
-  demuxer: WebDemuxer
-  baseUs: number
-}
-
-// Spinning up a WebDemuxer means starting a dedicated Worker and compiling
-// the ~4MB ffmpeg WASM module from scratch, so this is kept alive and reused
-// across every full-res download for the same file. It stays separate from
-// the scrubbing demuxer because a single demuxer can only serve one packet
-// reader at a time.
-let fullResCache: FullResDemuxerCacheT | null = null
-
-const createFullResDemuxer = async (file: File): Promise<FullResDemuxerCacheT> => {
-  const demuxer = new WebDemuxer({ wasmLoaderPath })
-  try {
-    await demuxer.load(file)
-    const basePacket = await demuxer.seekVideoPacket(0)
-    const baseUs = basePacket.timestamp * 1e6
-    return { file, demuxer, baseUs }
-  } catch (error) {
-    demuxer.destroy()
-    throw error
-  }
-}
-
-const getFullResDemuxer = async (file: File): Promise<FullResDemuxerCacheT> => {
-  const isCachedForThisFile = fullResCache !== null && fullResCache.file === file
-  if (isCachedForThisFile) return fullResCache as FullResDemuxerCacheT
-
-  fullResCache?.demuxer.destroy()
-  fullResCache = await createFullResDemuxer(file)
-  return fullResCache
-}
-
-// Releases the cached full-res demuxer. Call this when the viewer for a file
-// is torn down so its worker doesn't linger in the background.
-export const releaseFullResDemuxer = (): void => {
-  fullResCache?.demuxer.destroy()
-  fullResCache = null
-}
-
-// Re-decodes a single frame from the original file at full resolution and
-// returns it as a PNG. Reuses a cached demuxer instance (see above) so it
-// doesn't pay for a fresh WASM instance on every call.
+// Re-decodes a single frame at full resolution and returns it as a PNG. This
+// runs on the same Input as the scrubbing sink — media sinks are independent,
+// so an export never disturbs a scrub in progress, and there is no second
+// demuxer to keep warm.
+//
+// The sink is built per call on purpose: exporting is a deliberate, rare
+// action, and holding a decoder open between saves buys nothing.
 export const extractFullResFrame = async (
-  file: File,
+  track: InputVideoTrack,
   info: VideoInfoT,
   timeSec: number,
   viewRotation = 0,
 ): Promise<Blob> => {
-  const cached = await getFullResDemuxer(file)
-  const demuxer = cached.demuxer
-  let best: VideoFrame | null = null
+  const sink = new VideoSampleSink(track, { hardwareAcceleration: 'prefer-hardware' })
+  const sample = await sink.getSample(info.firstTimestampSec + timeSec)
+  if (!sample) throw new Error('No frame decoded at that time.')
+
   try {
-    const config = await demuxer.getVideoDecoderConfig()
-    const targetUs = cached.baseUs + timeSec * 1e6
-    const halfFrameUs = 0.5e6 / info.fps
+    // The sample already knows the container's rotation; the view rotation is
+    // whatever the user has added on top of it.
+    const totalRotation = normalizeRotation(sample.rotation + viewRotation)
+    const isSideways = viewRotation === 90 || viewRotation === 270
+    const outW = isSideways ? info.displayHeight : info.displayWidth
+    const outH = isSideways ? info.displayWidth : info.displayHeight
 
-    let pipelineError: Error | null = null
-    const decoder = new VideoDecoder({
-      output: (frame) => {
-        const distance = Math.abs(frame.timestamp - targetUs)
-        if (best === null || distance < Math.abs(best.timestamp - targetUs)) {
-          best?.close()
-          best = frame
-        } else {
-          frame.close()
-        }
-      },
-      error: (error) => {
-        pipelineError = error as Error
-      },
-    })
-    decoder.configure({ ...config, hardwareAcceleration: 'prefer-hardware' })
-
-    const seekSec = Math.max(0, cached.baseUs / 1e6 + timeSec)
-    const reader = demuxer.readVideoPacket(seekSec).getReader()
-    try {
-      while (!pipelineError) {
-        const { done, value } = await reader.read()
-        if (done) break
-        decoder.decode(demuxer.genEncodedVideoChunk(value))
-        // Packets arrive in decode order; once we're comfortably past the
-        // target in presentation time, everything needed has been queued.
-        if (value.timestamp * 1e6 > targetUs + halfFrameUs + 0.5e6) break
-        if (decoder.decodeQueueSize > 24) {
-          await new Promise((resolve) => setTimeout(resolve, 8))
-        }
-      }
-      if (!pipelineError) await decoder.flush()
-    } finally {
-      reader.cancel().catch(() => {})
-      try {
-        decoder.close()
-      } catch {
-        // already closed by an error
-      }
-    }
-
-    if (pipelineError) throw pipelineError
-    if (!best) throw new Error('No frame decoded at that time.')
-
-    const rotation = normalizeRotation(info.rotation + viewRotation)
-    const swapped = rotation === 90 || rotation === 270
-    const outW = swapped ? info.height : info.width
-    const outH = swapped ? info.width : info.height
     const canvas = new OffscreenCanvas(outW, outH)
     const ctx = canvas.getContext('2d')
     if (!ctx) throw new Error('Could not create a canvas context.')
-    drawRotated({ ctx, rotation, outW, outH }, best)
+
+    sample.drawWithFit(ctx, { fit: 'fill', rotation: totalRotation })
     return await canvas.convertToBlob({ type: 'image/png' })
   } finally {
-    ;(best as VideoFrame | null)?.close()
+    sample.close()
   }
 }

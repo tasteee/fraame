@@ -11,8 +11,8 @@
   },
   "dependencies": {
     "@tasteee/zest": "^0.1.0",
-    "solid-js": "^1.9.5",
-    "web-demuxer": "^2.2.1"
+    "mediabunny": "^1.51.0",
+    "solid-js": "^1.9.5"
   },
   "devDependencies": {
     "typescript": "^5.7.3",

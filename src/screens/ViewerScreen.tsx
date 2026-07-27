@@ -1,10 +1,12 @@
 import { For, Show, createEffect, createSignal, onCleanup, onMount } from 'solid-js'
 import type { FrameSourceT } from '../lib/frameSource'
-import { extractFullResFrame, getScrubSize, releaseFullResDemuxer, type VideoInfoT } from '../lib/video'
+import { extractFullResFrame, getScrubSize, type VideoInfoT } from '../lib/video'
 import { createVideoPreview, type VideoPreviewT } from '../lib/videoPreview'
+import type { InputVideoTrack } from 'mediabunny'
 
 type PropsT = {
   file: File
+  track: InputVideoTrack
   info: VideoInfoT
   source: FrameSourceT
   onReset: () => void
@@ -67,8 +69,6 @@ export const ViewerScreen = (props: PropsT) => {
   const [decodeError, setDecodeError] = createSignal<string | null>(null)
   let rootRef: HTMLDivElement | undefined
   let canvasRef: HTMLCanvasElement | undefined
-
-  onCleanup(() => releaseFullResDemuxer())
 
   const frameCount = () => props.source.frameCount
   const clampIndex = (i: number) => Math.max(0, Math.min(frameCount() - 1, i))
@@ -383,7 +383,7 @@ export const ViewerScreen = (props: PropsT) => {
     const toastId = addSaveToast(i)
     try {
       const timeSec = props.source.getTimeSec(i)
-      const blob = await extractFullResFrame(props.file, props.info, timeSec, viewRotation())
+      const blob = await extractFullResFrame(props.track, props.info, timeSec, viewRotation())
       const url = URL.createObjectURL(blob)
       const anchor = document.createElement('a')
       const base = props.file.name.replace(/\.[^.]+$/, '')

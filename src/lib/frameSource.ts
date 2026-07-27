@@ -1,32 +1,29 @@
-import type { WebDemuxer } from 'web-demuxer'
-import { drawRotated, getFrameCount, getScrubSize, type RotationDrawTargetT, type VideoInfoT } from './video'
+import { VideoSampleSink, type InputVideoTrack, type VideoSample } from 'mediabunny'
+import { getAbsoluteTimeSec, getFrameCount, getScrubSize, type VideoInfoT } from './video'
 
 // ImageBitmaps are GPU-backed and large, so the cache is bounded by total
 // pixels rather than by frame count.
 const MAX_CACHED_PIXELS = 64_000_000
 
-// How far past the requested frame to keep pulling packets. Everything decoded
+// How far past the requested frame to keep pulling samples. Everything decoded
 // on the way there is kept: reaching the requested frame already required
 // decoding its whole GOP, so discarding those frames only guarantees paying
 // for them again on the next small nudge.
-//
-// This no longer sits between the caller and its frame — requestFrame resolves
-// on arrival, not on drain — but the trailing flush still delays the *next*
-// seek, so the window stays modest.
 const DECODE_AHEAD = 24
 
-// Seeking lands on the keyframe at or before this point, so nudging back by a
-// hair keeps a request that sits exactly on a keyframe from overshooting.
-const SEEK_EPSILON_SEC = 0.001
-
-// Ceiling on packets fed between decodeQueueSize checks, so a pathological
-// stream can't run the queue away from us.
-const MAX_QUEUE_DEPTH = 24
-
-const waitMs = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+// How far ahead of an open iterator a request can sit and still be served by
+// pulling forward through it. Beyond this, restarting on a nearer keyframe
+// decodes less than walking there would.
+//
+// It is set well above DECODE_AHEAD deliberately. A restart costs a whole new
+// VideoDecoder — mediabunny builds one per iterator and closes it at the end —
+// and on Android that configure() is the 200-600ms MediaCodec spin-up that
+// makes scrubbing feel broken. Walking a couple of hundred frames forward
+// through a decoder that already exists is the cheaper mistake.
+const MAX_FORWARD_PULL = 180
 
 export type FrameSourceParamsT = {
-  demuxer: WebDemuxer
+  track: InputVideoTrack
   info: VideoInfoT
 }
 
@@ -39,8 +36,17 @@ export type FrameSourceT = {
   destroy: () => void
 }
 
+// A suspended run of samples, held open between requests. Keeping it alive is
+// the whole point: a scrub that moves forward reuses one decoder for its
+// entire length instead of building one per settle.
+type DecodeWindowT = {
+  samples: AsyncGenerator<VideoSample, void, unknown>
+  lastYieldedIndex: number
+  isExhausted: boolean
+}
+
 export const createFrameSource = (params: FrameSourceParamsT): FrameSourceT => {
-  const demuxer = params.demuxer
+  const track = params.track
   const info = params.info
   const frameCount = getFrameCount(info)
 
@@ -50,7 +56,14 @@ export const createFrameSource = (params: FrameSourceParamsT): FrameSourceT => {
   const canvas = new OffscreenCanvas(size.outW, size.outH)
   const ctx = canvas.getContext('2d')
   if (!ctx) throw new Error('Could not create a canvas context.')
-  const drawTarget: RotationDrawTargetT = { ctx, rotation: info.rotation, outW: size.outW, outH: size.outH }
+
+  // optimizeForLatency keeps the decoder from buffering ahead, which is what
+  // we want when a scrub cares about the frame it just asked for rather than
+  // sustained throughput.
+  const sampleSink = new VideoSampleSink(track, {
+    hardwareAcceleration: 'prefer-hardware',
+    optimizeForLatency: true,
+  })
 
   const cache = new Map<number, ImageBitmap>()
   let cachedPixels = 0
@@ -59,8 +72,8 @@ export const createFrameSource = (params: FrameSourceParamsT): FrameSourceT => {
 
   const getTimeSec = (index: number): number => index / info.fps
 
-  const toFrameIndex = (timestampUs: number, baseUs: number): number => {
-    return Math.round(((timestampUs - baseUs) / 1e6) * info.fps)
+  const toFrameIndex = (timestampSec: number): number => {
+    return Math.round((timestampSec - info.firstTimestampSec) * info.fps)
   }
 
   // ---- cache ----
@@ -76,20 +89,22 @@ export const createFrameSource = (params: FrameSourceParamsT): FrameSourceT => {
   // Evicts whatever sits farthest from the playhead, so the frames a scrub is
   // most likely to revisit are the last to go.
   const evictToBudget = () => {
-    while (cachedPixels > MAX_CACHED_PIXELS && cache.size > 1) {
-      let farthestIndex = -1
-      let farthestDistance = -1
+    const isOverBudget = cachedPixels > MAX_CACHED_PIXELS && cache.size > 1
+    if (!isOverBudget) return
 
-      for (const index of cache.keys()) {
-        const distance = Math.abs(index - lastRequestedIndex)
-        if (distance <= farthestDistance) continue
-        farthestDistance = distance
-        farthestIndex = index
-      }
+    let farthestIndex = -1
+    let farthestDistance = -1
 
-      if (farthestIndex < 0) return
-      dropCached(farthestIndex)
+    for (const index of cache.keys()) {
+      const distance = Math.abs(index - lastRequestedIndex)
+      if (distance <= farthestDistance) continue
+      farthestDistance = distance
+      farthestIndex = index
     }
+
+    if (farthestIndex < 0) return
+    dropCached(farthestIndex)
+    evictToBudget()
   }
 
   const putCached = (index: number, bitmap: ImageBitmap) => {
@@ -119,36 +134,11 @@ export const createFrameSource = (params: FrameSourceParamsT): FrameSourceT => {
     return nearestBitmap
   }
 
-  // ---- demuxer probes ----
-
-  let baseUsPromise: Promise<number> | null = null
-
-  const getBaseUs = (): Promise<number> => {
-    if (baseUsPromise) return baseUsPromise
-    baseUsPromise = demuxer.seekVideoPacket(0).then((packet) => packet.timestamp * 1e6)
-    return baseUsPromise
-  }
-
-  // Probing the container for a decoder config is a round trip to the demuxer
-  // worker, and the answer never changes for a given file.
-  let configPromise: Promise<VideoDecoderConfig> | null = null
-
-  const getDecoderConfig = (): Promise<VideoDecoderConfig> => {
-    if (configPromise) return configPromise
-    configPromise = demuxer.getVideoDecoderConfig()
-    return configPromise
-  }
-
-  let queuedIndex: number | null = null
-  let runningPump: Promise<void> | null = null
-
   // ---- arrival waiters ----
 
   // The frame a caller asked for is usually decoded long before the read-ahead
-  // window finishes draining. Waiting for the drain is what made a seek feel
-  // slow on Android, where MediaCodec turns a couple dozen trailing frames
-  // into real milliseconds. These let requestFrame settle the moment its own
-  // frame lands, while the read-ahead keeps filling the cache behind it.
+  // window finishes. These let requestFrame settle the moment its own frame
+  // lands, while the read-ahead keeps filling the cache behind it.
   type FrameWaiterT = {
     arrival: Promise<ImageBitmap>
     dispose: () => void
@@ -186,30 +176,61 @@ export const createFrameSource = (params: FrameSourceParamsT): FrameSourceT => {
     return { arrival, dispose }
   }
 
-  const captureFrame = (frame: VideoFrame, index: number) => {
-    drawRotated(drawTarget, frame)
+  // ---- decode ----
+
+  let queuedIndex: number | null = null
+  let runningPump: Promise<void> | null = null
+  let openWindow: DecodeWindowT | null = null
+
+  const captureFrame = (sample: VideoSample, index: number) => {
+    // The sample carries the container's rotation, so this lands upright
+    // without any transform of ours; 'fill' is exact because the canvas was
+    // sized from the same display dimensions.
+    sample.drawWithFit(ctx, { fit: 'fill' })
     putCached(index, canvas.transferToImageBitmap())
   }
 
-  // ---- decoder lifetime ----
+  const closeWindow = async () => {
+    if (!openWindow) return
 
-  // One decoder is kept alive for the whole session. Constructing and
-  // configuring a VideoDecoder is nearly free on VideoToolbox, but on Android
-  // configure() spins up a fresh MediaCodec instance and costs 200-600ms —
-  // paid once per scrub if the decoder is rebuilt per request, which is what
-  // made seeking feel broken on Android while iOS felt fine.
-  //
-  // Nothing is reset between seeks: every seek starts on a keyframe, and a
-  // keyframe resynchronises a decoder on its own.
-  let decoder: VideoDecoder | null = null
-  let decoderError: Error | null = null
-  let decodeBaseUs = 0
+    const closing = openWindow
+    openWindow = null
+    await closing.samples.return()
+  }
 
-  const handleDecodedFrame = (frame: VideoFrame) => {
-    const frameIndex = toFrameIndex(frame.timestamp, decodeBaseUs)
+  // A window can serve a request only by moving forward through it. Anything
+  // behind its last frame, or too far ahead of it, needs a fresh seek.
+  const getContinuableWindow = (requestIndex: number): DecodeWindowT | null => {
+    const window = openWindow
+    if (!window || window.isExhausted) return null
+
+    const distanceAhead = requestIndex - window.lastYieldedIndex
+    const isReachable = distanceAhead >= 0 && distanceAhead <= MAX_FORWARD_PULL
+    if (!isReachable) return null
+    return window
+  }
+
+  const openWindowAt = async (requestIndex: number): Promise<DecodeWindowT> => {
+    await closeWindow()
+
+    const startSec = getAbsoluteTimeSec(info, requestIndex)
+    const window: DecodeWindowT = {
+      samples: sampleSink.samples(startSec),
+      lastYieldedIndex: requestIndex - 1,
+      isExhausted: false,
+    }
+
+    openWindow = window
+    return window
+  }
+
+  const consumeSample = (window: DecodeWindowT, sample: VideoSample) => {
+    const frameIndex = toFrameIndex(sample.timestamp)
+    window.lastYieldedIndex = frameIndex
+
     const shouldCapture = !cache.has(frameIndex) && !isDestroyed
-    if (shouldCapture) captureFrame(frame, frameIndex)
-    frame.close()
+    if (shouldCapture) captureFrame(sample, frameIndex)
+    sample.close()
 
     // Read back rather than trusting the capture: putCached runs eviction, so
     // in a pathological case the bitmap just added may already be gone.
@@ -217,87 +238,37 @@ export const createFrameSource = (params: FrameSourceParamsT): FrameSourceT => {
     if (stored) notifyFrameWaiters(frameIndex, stored)
   }
 
-  const discardDecoder = () => {
-    decoderError = null
-    if (!decoder) return
+  // Pulls one sample at a time so the generator stays suspended rather than
+  // closed when we stop early. A `for await...of` loop would call return() on
+  // break and take the decoder down with it, which is exactly what this
+  // window exists to avoid.
+  const pullThrough = async (window: DecodeWindowT, stopIndex: number): Promise<void> => {
+    if (isDestroyed) return
 
-    try {
-      decoder.close()
-    } catch {
-      // already closed by the error that got us here
+    // A newer request landed. Leave the generator suspended — the next
+    // request is usually just ahead of here and can carry straight on.
+    if (queuedIndex !== null) return
+
+    const result = await window.samples.next()
+    if (result.done) {
+      window.isExhausted = true
+      return
     }
-    decoder = null
+
+    consumeSample(window, result.value)
+    if (window.lastYieldedIndex >= stopIndex) return
+    await pullThrough(window, stopIndex)
   }
 
-  const getDecoder = async (): Promise<VideoDecoder> => {
-    const isReusable = decoder !== null && decoder.state !== 'closed'
-    if (isReusable) return decoder as VideoDecoder
-
-    const config = await getDecoderConfig()
-
-    const created = new VideoDecoder({
-      output: handleDecodedFrame,
-      error: (error) => {
-        decoderError = error as Error
-      },
-    })
-
-    // optimizeForLatency keeps the decoder from buffering ahead, which is what
-    // we want when every decode starts from a fresh seek.
-    created.configure({ ...config, hardwareAcceleration: 'prefer-hardware', optimizeForLatency: true })
-    decoder = created
-    return created
-  }
-
-  // ---- decode ----
-
-  // Seeks to the keyframe at or before the requested frame and decodes forward
-  // through it, keeping everything it produces. Cost is proportional to
-  // distance from the keyframe, not to video length.
   const decodeAround = async (requestIndex: number) => {
-    decodeBaseUs = await getBaseUs()
+    const continuable = getContinuableWindow(requestIndex)
+    const window = continuable === null ? await openWindowAt(requestIndex) : continuable
     if (isDestroyed) return
 
-    const activeDecoder = await getDecoder()
-    if (isDestroyed) return
-
-    const stopUs = decodeBaseUs + getTimeSec(requestIndex + DECODE_AHEAD) * 1e6
-    const seekSec = Math.max(0, decodeBaseUs / 1e6 + getTimeSec(requestIndex) - SEEK_EPSILON_SEC)
-    const reader = demuxer.readVideoPacket(seekSec).getReader()
-
-    try {
-      while (!decoderError && !isDestroyed) {
-        // A newer request landed while this one was still decoding. Stop
-        // pulling packets, but let what is already queued drain — those frames
-        // are valid and land in the cache either way.
-        if (queuedIndex !== null) break
-
-        const { done, value } = await reader.read()
-        if (done) break
-
-        activeDecoder.decode(demuxer.genEncodedVideoChunk(value))
-        if (value.timestamp * 1e6 > stopUs) break
-
-        const isQueueBacked = activeDecoder.decodeQueueSize > MAX_QUEUE_DEPTH
-        if (isQueueBacked) await waitMs(8)
-      }
-
-      // Draining before returning keeps the next seek's packets from
-      // interleaving with this one's inside a decoder we no longer rebuild.
-      const canFlush = !decoderError && !isDestroyed && activeDecoder.state === 'configured'
-      if (canFlush) await activeDecoder.flush()
-    } finally {
-      reader.cancel().catch(() => {})
-    }
-
-    if (!decoderError) return
-
-    const failure = decoderError
-    discardDecoder()
-    throw failure
+    await pullThrough(window, requestIndex + DECODE_AHEAD)
   }
 
-  // Single-flight: only one decode runs against the demuxer at a time, and a
+  // Single-flight: only one decode runs against the track at a time, and a
   // request that arrives mid-decode replaces any other request waiting behind
   // it rather than queueing up behind a scrub the user already moved past.
   const pump = (): Promise<void> => {
@@ -320,7 +291,7 @@ export const createFrameSource = (params: FrameSourceParamsT): FrameSourceT => {
   }
 
   // A pump already on its final tick when a request arrives can settle without
-  // ever seeing it, which used to strand the caller on a frame that never
+  // ever seeing it, which would strand the caller on a frame that never
   // decoded. Chaining a fresh pump behind the running one closes that gap.
   const pumpUntilIdle = async (): Promise<void> => {
     await pump()
@@ -356,11 +327,10 @@ export const createFrameSource = (params: FrameSourceParamsT): FrameSourceT => {
     isDestroyed = true
     queuedIndex = null
     frameWaiters.clear()
-    discardDecoder()
+    void closeWindow()
     for (const bitmap of cache.values()) bitmap.close()
     cache.clear()
     cachedPixels = 0
-    demuxer.destroy()
   }
 
   return { frameCount, getCached, getNearestCached, requestFrame, getTimeSec, destroy }

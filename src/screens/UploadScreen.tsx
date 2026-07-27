@@ -24,7 +24,7 @@ export const UploadScreen = (props: PropsT) => {
 
   const acceptFile = async (file: File | undefined) => {
     if (!file || phase() === "probing") return;
-    probe()?.demuxer.destroy();
+    probe()?.input.dispose();
     setProbe(null);
     setError(null);
     setPhase("probing");
@@ -128,7 +128,7 @@ export const UploadScreen = (props: PropsT) => {
                 <div class="clip-info">
                   <strong>{result().info.fileName}</strong>
                   <span>
-                    {result().info.width}x{result().info.height} -{" "}
+                    {result().info.displayWidth}x{result().info.displayHeight} -{" "}
                     {result().info.fps.toFixed(2)} fps -{" "}
                     {formatDuration(result().info.durationSec)}
                   </span>

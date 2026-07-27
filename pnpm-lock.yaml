@@ -11,12 +11,12 @@ importers:
       '@tasteee/zest':
         specifier: ^0.1.0
         version: 0.1.0
+      mediabunny:
+        specifier: ^1.51.0
+        version: 1.51.0
       solid-js:
         specifier: ^1.9.5
         version: 1.9.14
-      web-demuxer:
-        specifier: ^2.2.1
-        version: 2.3.8
     devDependencies:
       typescript:
         specifier: ^5.7.3
@@ -436,6 +436,12 @@ packages:
   '@types/babel__traverse@7.28.0':
     resolution: {integrity: sha512-8PvcXf70gTDZBgt9ptxJ8elBeBjcLOAcOtoO/mPJjtji1+CdGbHgm77om1GrsPxsiE+uXIpNSK64UYaIwQXd4Q==}
 
+  '@types/dom-mediacapture-transform@0.1.12':
+    resolution: {integrity: sha512-d7/QsLRwF864A5mgIM/YrfiglHoYn7zgCcAoJgW404r+2DwnNr7EBbLnCWpmOMgH8y0te73L1AV6H1bmauaWFw==}
+
+  '@types/dom-webcodecs@0.1.13':
+    resolution: {integrity: sha512-O5hkiFIcjjszPIYyUSyvScyvrBoV3NOEEZx/pMlsu44TKzWNkLVBBxnxJz42in5n3QIolYOcBYFCPZZ0h8SkwQ==}
+
   '@types/estree@1.0.9':
     resolution: {integrity: sha512-GhdPgy1el4/ImP05X05Uw4cw2/M93BCUmnEvWZNStlCzEKME4Fkk+YpoA5OiHNQmoS7Cafb8Xa3Pya8m1Qrzeg==}
 
@@ -537,6 +543,9 @@ packages:
 
   lru-cache@5.1.1:
     resolution: {integrity: sha512-KpNARQA3Iwv+jTA0utUVVbrh+Jlrr1Fv0e56GGzAFOXN7dk/FviaDW8LHmK52DlcH4WP2n6gI8vN1aesBFgo9w==}
+
+  mediabunny@1.51.0:
+    resolution: {integrity: sha512-u327374xU8Ho0gCaMII7fUK8t0PnqkabCox1k8uUwvgvGb9o6YQGZEG2Qr4DTe7nTMpzfL7ukgnHDvDROySZ+Q==}
 
   merge-anything@5.1.7:
     resolution: {integrity: sha512-eRtbOb1N5iyH0tkQDAoQ4Ipsp/5qSR79Dzrz8hEPxRX10RWWR/iQXdoKmBSRCThY1Fh5EhISDtpSc93fpxUniQ==}
@@ -671,10 +680,6 @@ packages:
     peerDependenciesMeta:
       vite:
         optional: true
-
-  web-demuxer@2.3.8:
-    resolution: {integrity: sha512-n8bawDfHO0090/3YKkF6OGOTJKUKukOeBuVjdBVbi1RiBCkvTpaCmNYNoj2rgBDOpY3WkXibBlFltYxtQFlbsg==}
-    engines: {node: '>=18', pnpm: '>=8'}
 
   yallist@3.1.1:
     resolution: {integrity: sha512-a4UGQaWPH59mOXUYnAG2ewncQS4i4F43Tv3JoAM+s2VDAmS9NsK8GpDMLrCHPksFT7h3K6TOoUNn2pb7RoXx4g==}
@@ -987,6 +992,12 @@ snapshots:
     dependencies:
       '@babel/types': 7.29.7
 
+  '@types/dom-mediacapture-transform@0.1.12':
+    dependencies:
+      '@types/dom-webcodecs': 0.1.13
+
+  '@types/dom-webcodecs@0.1.13': {}
+
   '@types/estree@1.0.9': {}
 
   babel-plugin-jsx-dom-expressions@0.40.7(@babel/core@7.29.7):
@@ -1082,6 +1093,11 @@ snapshots:
   lru-cache@5.1.1:
     dependencies:
       yallist: 3.1.1
+
+  mediabunny@1.51.0:
+    dependencies:
+      '@types/dom-mediacapture-transform': 0.1.12
+      '@types/dom-webcodecs': 0.1.13
 
   merge-anything@5.1.7:
     dependencies:
@@ -1203,7 +1219,5 @@ snapshots:
   vitefu@1.1.3(vite@6.4.3):
     optionalDependencies:
       vite: 6.4.3
-
-  web-demuxer@2.3.8: {}
 
   yallist@3.1.1: {}

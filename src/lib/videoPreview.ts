@@ -7,9 +7,9 @@ import type { VideoInfoT } from './video'
 // while the exact WebCodecs path is still working, which is the difference
 // between a scrub that feels soft and one that feels broken.
 //
-// It is also allowed to fail. A container ffmpeg can demux but the browser
-// can't play natively (mkv, avi, wmv) leaves the preview unusable, and the
-// viewer simply carries on without it.
+// It is also allowed to fail. A container mediabunny can demux but the
+// browser won't play natively (some .mkv and .ts, mainly) leaves the preview
+// unusable, and the viewer simply carries on without it.
 
 // Seeks are coalesced to one per animation frame, and a seek already in
 // flight is never interrupted — the newest requested time is committed as
