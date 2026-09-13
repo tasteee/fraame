@@ -1,4 +1,5 @@
 import { For, Show, createEffect, createSignal, onCleanup, onMount } from 'solid-js'
+import { FastForward, Play, Rewind } from 'lucide-solid'
 import type { FrameSourceT } from '../lib/frameSource'
 import { extractFullResFrame, getScrubSize, type VideoInfoT } from '../lib/video'
 import { createVideoPreview, type VideoPreviewT } from '../lib/videoPreview'
@@ -493,7 +494,7 @@ export const ViewerScreen = (props: PropsT) => {
             title={`Back ${LARGE_JUMP_SEC}s`}
             onClick={() => jumpBySec(-LARGE_JUMP_SEC)}
           >
-            <span aria-hidden="true">⏪</span>
+            <Rewind size={18} style={{ transform: 'rotate(90deg)' }} aria-hidden="true" />
           </button>
           <button
             type="button"
@@ -502,7 +503,7 @@ export const ViewerScreen = (props: PropsT) => {
             title={`Back ${SMALL_JUMP_SEC}s`}
             onClick={() => jumpBySec(-SMALL_JUMP_SEC)}
           >
-            <span aria-hidden="true">◀</span>
+            <Play size={18} style={{ transform: 'rotate(-90deg)' }} aria-hidden="true" />
           </button>
           <button
             type="button"
@@ -511,7 +512,7 @@ export const ViewerScreen = (props: PropsT) => {
             title={`Forward ${SMALL_JUMP_SEC}s`}
             onClick={() => jumpBySec(SMALL_JUMP_SEC)}
           >
-            <span aria-hidden="true">▶</span>
+            <Play size={18} style={{ transform: 'rotate(90deg)' }} aria-hidden="true" />
           </button>
           <button
             type="button"
@@ -520,7 +521,7 @@ export const ViewerScreen = (props: PropsT) => {
             title={`Forward ${LARGE_JUMP_SEC}s`}
             onClick={() => jumpBySec(LARGE_JUMP_SEC)}
           >
-            <span aria-hidden="true">⏩</span>
+            <FastForward size={18} style={{ transform: 'rotate(90deg)' }} aria-hidden="true" />
           </button>
         </div>
       </div>
