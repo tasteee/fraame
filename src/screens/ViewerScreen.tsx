@@ -1,5 +1,7 @@
 import { For, Show, createEffect, createSignal, onCleanup, onMount } from 'solid-js'
-import { FastForward, Play, Rewind } from 'lucide-solid'
+import FastForward from 'lucide-solid/icons/fast-forward'
+import Play from 'lucide-solid/icons/play'
+import Rewind from 'lucide-solid/icons/rewind'
 import type { FrameSourceT } from '../lib/frameSource'
 import { extractFullResFrame, getScrubSize, type VideoInfoT } from '../lib/video'
 import { createVideoPreview, type VideoPreviewT } from '../lib/videoPreview'
