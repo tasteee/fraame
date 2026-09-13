@@ -318,6 +318,26 @@ body {
   transform: translateX(-50%);
 }
 
+.overlay.left-center {
+  top: 50%;
+  left: max(12px, env(safe-area-inset-left));
+  transform: translateY(-50%);
+  pointer-events: auto;
+}
+
+.jump-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.hud-icon-button {
+  min-width: 0;
+  width: 40px;
+  padding: 0;
+  font-size: 1rem;
+}
+
 .overlay.bottom-center {
   bottom: max(14px, env(safe-area-inset-bottom));
   left: 50%;

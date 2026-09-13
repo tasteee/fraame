@@ -11,6 +11,9 @@ importers:
       '@tasteee/zest':
         specifier: ^0.1.0
         version: 0.1.0
+      lucide-solid:
+        specifier: ^1.45.0
+        version: 1.45.0(solid-js@1.9.14)
       mediabunny:
         specifier: ^1.51.0
         version: 1.51.0
@@ -543,6 +546,11 @@ packages:
 
   lru-cache@5.1.1:
     resolution: {integrity: sha512-KpNARQA3Iwv+jTA0utUVVbrh+Jlrr1Fv0e56GGzAFOXN7dk/FviaDW8LHmK52DlcH4WP2n6gI8vN1aesBFgo9w==}
+
+  lucide-solid@1.45.0:
+    resolution: {integrity: sha512-aNhW4zWzRpBjpFVCAwXvpzkoCNpYrBkuPq3Fb9qsOkr3H83jJH+gaabgQL+nB7hv3qa2S+vT8qg2Lk8+kldbsQ==}
+    peerDependencies:
+      solid-js: ^1.4.7
 
   mediabunny@1.51.0:
     resolution: {integrity: sha512-u327374xU8Ho0gCaMII7fUK8t0PnqkabCox1k8uUwvgvGb9o6YQGZEG2Qr4DTe7nTMpzfL7ukgnHDvDROySZ+Q==}
@@ -1093,6 +1101,10 @@ snapshots:
   lru-cache@5.1.1:
     dependencies:
       yallist: 3.1.1
+
+  lucide-solid@1.45.0(solid-js@1.9.14):
+    dependencies:
+      solid-js: 1.9.14
 
   mediabunny@1.51.0:
     dependencies:

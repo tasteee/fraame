@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@tasteee/zest": "^0.1.0",
+    "lucide-solid": "^1.45.0",
     "mediabunny": "^1.51.0",
     "solid-js": "^1.9.5"
   },

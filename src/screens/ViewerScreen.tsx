@@ -1,4 +1,7 @@
 import { For, Show, createEffect, createSignal, onCleanup, onMount } from 'solid-js'
+import FastForward from 'lucide-solid/icons/fast-forward'
+import Play from 'lucide-solid/icons/play'
+import Rewind from 'lucide-solid/icons/rewind'
 import type { FrameSourceT } from '../lib/frameSource'
 import { extractFullResFrame, getScrubSize, type VideoInfoT } from '../lib/video'
 import { createVideoPreview, type VideoPreviewT } from '../lib/videoPreview'
@@ -19,6 +22,11 @@ const FINE_PX_PER_FRAME = 48
 const TAP_MAX_MOVEMENT = 12
 const TAP_MAX_GAP_MS = 450
 const VIEW_ROTATIONS = [0, 90, 180, 270] as const
+
+// Lets scrubbing a long video skip straight to the part you want instead of
+// dragging through every frame in between.
+const SMALL_JUMP_SEC = 5
+const LARGE_JUMP_SEC = 20
 
 // Mid-drag the index changes on every pointer event. Waiting for it to settle
 // keeps a fast scrub from queueing a decode for frames nobody will look at.
@@ -311,6 +319,10 @@ export const ViewerScreen = (props: PropsT) => {
     }
   }
 
+  const jumpBySec = (deltaSec: number) => {
+    setIndex(clampIndex(index() + Math.round(deltaSec * props.info.fps)))
+  }
+
   const onKeyDown = (event: KeyboardEvent) => {
     if (event.key === 'ArrowRight') setIndex(clampIndex(index() + 1))
     else if (event.key === 'ArrowLeft') setIndex(clampIndex(index() - 1))
@@ -375,6 +387,29 @@ export const ViewerScreen = (props: PropsT) => {
     for (const timer of toastTimers.values()) clearTimeout(timer)
   })
 
+  // iOS Safari has no way to write to Photos without user interaction, but the
+  // share sheet's own "Save Image" does it in one tap — miles better than the
+  // Files-app download, which lands as a document the user has to relocate
+  // and de-duplicate by hand. Windows' share sheet has no such save target
+  // (just apps to send the file to), so desktop is better off with a normal
+  // download than a share dialog that dead-ends.
+  const isMobileDevice = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
+
+  const canShareFile = (file: File): boolean => {
+    if (!isMobileDevice) return false
+    if (typeof navigator.share !== 'function' || typeof navigator.canShare !== 'function') return false
+    return navigator.canShare({ files: [file] })
+  }
+
+  const downloadViaAnchor = (blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = filename
+    anchor.click()
+    URL.revokeObjectURL(url)
+  }
+
   const downloadCurrentFrame = async () => {
     const i = index()
     const isAlreadySavingThisFrame = saveToasts().some((entry) => entry.frameIndex === i && entry.status === 'saving')
@@ -384,16 +419,25 @@ export const ViewerScreen = (props: PropsT) => {
     try {
       const timeSec = props.source.getTimeSec(i)
       const blob = await extractFullResFrame(props.track, props.info, timeSec, viewRotation())
-      const url = URL.createObjectURL(blob)
-      const anchor = document.createElement('a')
       const base = props.file.name.replace(/\.[^.]+$/, '')
-      anchor.href = url
-      anchor.download = `${base}-frame-${i + 1}.png`
-      anchor.click()
-      URL.revokeObjectURL(url)
+      const filename = `${base}-frame-${i + 1}.png`
+      const file = new File([blob], filename, { type: blob.type })
+
+      if (canShareFile(file)) {
+        await navigator.share({ files: [file] })
+      } else {
+        downloadViaAnchor(blob, filename)
+      }
+
       updateSaveToastStatus(toastId, 'saved')
       scheduleToastRemoval(toastId, 1600)
-    } catch {
+    } catch (error) {
+      // The user dismissing the share sheet is not a failed save.
+      const isCancelled = error instanceof Error && error.name === 'AbortError'
+      if (isCancelled) {
+        removeSaveToast(toastId)
+        return
+      }
       updateSaveToastStatus(toastId, 'error')
       scheduleToastRemoval(toastId, 2200)
     }
@@ -445,6 +489,47 @@ export const ViewerScreen = (props: PropsT) => {
           <z-link size="sm" on:click={props.onReset}>
             ↺ start over
           </z-link>
+        </div>
+      </div>
+
+      <div class="overlay left-center" onPointerDown={(event) => event.stopPropagation()}>
+        <div class="jump-buttons">
+          <button
+            type="button"
+            class="hud-button hud-icon-button"
+            aria-label={`Jump back ${LARGE_JUMP_SEC} seconds`}
+            title={`Back ${LARGE_JUMP_SEC}s`}
+            onClick={() => jumpBySec(-LARGE_JUMP_SEC)}
+          >
+            <Rewind size={18} style={{ transform: 'rotate(90deg)' }} aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            class="hud-button hud-icon-button"
+            aria-label={`Jump back ${SMALL_JUMP_SEC} seconds`}
+            title={`Back ${SMALL_JUMP_SEC}s`}
+            onClick={() => jumpBySec(-SMALL_JUMP_SEC)}
+          >
+            <Play size={18} style={{ transform: 'rotate(-90deg)' }} aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            class="hud-button hud-icon-button"
+            aria-label={`Jump forward ${SMALL_JUMP_SEC} seconds`}
+            title={`Forward ${SMALL_JUMP_SEC}s`}
+            onClick={() => jumpBySec(SMALL_JUMP_SEC)}
+          >
+            <Play size={18} style={{ transform: 'rotate(90deg)' }} aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            class="hud-button hud-icon-button"
+            aria-label={`Jump forward ${LARGE_JUMP_SEC} seconds`}
+            title={`Forward ${LARGE_JUMP_SEC}s`}
+            onClick={() => jumpBySec(LARGE_JUMP_SEC)}
+          >
+            <FastForward size={18} style={{ transform: 'rotate(90deg)' }} aria-hidden="true" />
+          </button>
         </div>
       </div>
 
