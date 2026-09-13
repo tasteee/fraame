@@ -384,6 +384,24 @@ export const ViewerScreen = (props: PropsT) => {
     for (const timer of toastTimers.values()) clearTimeout(timer)
   })
 
+  // iOS Safari has no way to write to Photos without user interaction, but the
+  // share sheet's own "Save Image" does it in one tap — miles better than the
+  // Files-app download, which lands as a document the user has to relocate
+  // and de-duplicate by hand.
+  const canShareFile = (file: File): boolean => {
+    if (typeof navigator.share !== 'function' || typeof navigator.canShare !== 'function') return false
+    return navigator.canShare({ files: [file] })
+  }
+
+  const downloadViaAnchor = (blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = filename
+    anchor.click()
+    URL.revokeObjectURL(url)
+  }
+
   const downloadCurrentFrame = async () => {
     const i = index()
     const isAlreadySavingThisFrame = saveToasts().some((entry) => entry.frameIndex === i && entry.status === 'saving')
@@ -393,16 +411,25 @@ export const ViewerScreen = (props: PropsT) => {
     try {
       const timeSec = props.source.getTimeSec(i)
       const blob = await extractFullResFrame(props.track, props.info, timeSec, viewRotation())
-      const url = URL.createObjectURL(blob)
-      const anchor = document.createElement('a')
       const base = props.file.name.replace(/\.[^.]+$/, '')
-      anchor.href = url
-      anchor.download = `${base}-frame-${i + 1}.png`
-      anchor.click()
-      URL.revokeObjectURL(url)
+      const filename = `${base}-frame-${i + 1}.png`
+      const file = new File([blob], filename, { type: blob.type })
+
+      if (canShareFile(file)) {
+        await navigator.share({ files: [file] })
+      } else {
+        downloadViaAnchor(blob, filename)
+      }
+
       updateSaveToastStatus(toastId, 'saved')
       scheduleToastRemoval(toastId, 1600)
-    } catch {
+    } catch (error) {
+      // The user dismissing the share sheet is not a failed save.
+      const isCancelled = error instanceof Error && error.name === 'AbortError'
+      if (isCancelled) {
+        removeSaveToast(toastId)
+        return
+      }
       updateSaveToastStatus(toastId, 'error')
       scheduleToastRemoval(toastId, 2200)
     }
