@@ -20,6 +20,11 @@ const TAP_MAX_MOVEMENT = 12
 const TAP_MAX_GAP_MS = 450
 const VIEW_ROTATIONS = [0, 90, 180, 270] as const
 
+// Lets scrubbing a long video skip straight to the part you want instead of
+// dragging through every frame in between.
+const SMALL_JUMP_SEC = 5
+const LARGE_JUMP_SEC = 20
+
 // Mid-drag the index changes on every pointer event. Waiting for it to settle
 // keeps a fast scrub from queueing a decode for frames nobody will look at.
 const DECODE_SETTLE_MS = 55
@@ -311,6 +316,10 @@ export const ViewerScreen = (props: PropsT) => {
     }
   }
 
+  const jumpBySec = (deltaSec: number) => {
+    setIndex(clampIndex(index() + Math.round(deltaSec * props.info.fps)))
+  }
+
   const onKeyDown = (event: KeyboardEvent) => {
     if (event.key === 'ArrowRight') setIndex(clampIndex(index() + 1))
     else if (event.key === 'ArrowLeft') setIndex(clampIndex(index() - 1))
@@ -445,6 +454,47 @@ export const ViewerScreen = (props: PropsT) => {
           <z-link size="sm" on:click={props.onReset}>
             ↺ start over
           </z-link>
+        </div>
+      </div>
+
+      <div class="overlay left-center" onPointerDown={(event) => event.stopPropagation()}>
+        <div class="jump-buttons">
+          <button
+            type="button"
+            class="hud-button hud-icon-button"
+            aria-label={`Jump back ${LARGE_JUMP_SEC} seconds`}
+            title={`Back ${LARGE_JUMP_SEC}s`}
+            onClick={() => jumpBySec(-LARGE_JUMP_SEC)}
+          >
+            <span aria-hidden="true">⏪</span>
+          </button>
+          <button
+            type="button"
+            class="hud-button hud-icon-button"
+            aria-label={`Jump back ${SMALL_JUMP_SEC} seconds`}
+            title={`Back ${SMALL_JUMP_SEC}s`}
+            onClick={() => jumpBySec(-SMALL_JUMP_SEC)}
+          >
+            <span aria-hidden="true">◀</span>
+          </button>
+          <button
+            type="button"
+            class="hud-button hud-icon-button"
+            aria-label={`Jump forward ${SMALL_JUMP_SEC} seconds`}
+            title={`Forward ${SMALL_JUMP_SEC}s`}
+            onClick={() => jumpBySec(SMALL_JUMP_SEC)}
+          >
+            <span aria-hidden="true">▶</span>
+          </button>
+          <button
+            type="button"
+            class="hud-button hud-icon-button"
+            aria-label={`Jump forward ${LARGE_JUMP_SEC} seconds`}
+            title={`Forward ${LARGE_JUMP_SEC}s`}
+            onClick={() => jumpBySec(LARGE_JUMP_SEC)}
+          >
+            <span aria-hidden="true">⏩</span>
+          </button>
         </div>
       </div>
 
