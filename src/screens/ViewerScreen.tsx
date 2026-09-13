@@ -390,8 +390,13 @@ export const ViewerScreen = (props: PropsT) => {
   // iOS Safari has no way to write to Photos without user interaction, but the
   // share sheet's own "Save Image" does it in one tap — miles better than the
   // Files-app download, which lands as a document the user has to relocate
-  // and de-duplicate by hand.
+  // and de-duplicate by hand. Windows' share sheet has no such save target
+  // (just apps to send the file to), so desktop is better off with a normal
+  // download than a share dialog that dead-ends.
+  const isMobileDevice = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
+
   const canShareFile = (file: File): boolean => {
+    if (!isMobileDevice) return false
     if (typeof navigator.share !== 'function' || typeof navigator.canShare !== 'function') return false
     return navigator.canShare({ files: [file] })
   }
